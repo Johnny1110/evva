@@ -4,8 +4,10 @@ import (
 	"log/slog"
 	"os"
 
+	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/greeter"
 	"github.com/johnny1110/evva/internal/logger"
+	"github.com/johnny1110/evva/pkg/common"
 	"github.com/joho/godotenv"
 )
 
@@ -14,7 +16,8 @@ func main() {
 	_ = godotenv.Load()
 
 	// setup log
-	logAgent1, _ := logger.FromEnv("001")
+	mainAgentID := common.GenUUID()
+	logAgent1, _ := logger.OfAgent("", mainAgentID)
 	slog.SetDefault(logAgent1)
 
 	name := "World"
@@ -26,7 +29,9 @@ func main() {
 	greeting := greeter.Greet(name)
 	logAgent1.Info("greeting ready", "greeting", greeting)
 
-	logAgent2, _ := logger.FromEnv("002")
+	logAgent2, _ := logger.OfAgent(mainAgentID, common.GenUUID())
 	logAgent2.Debug("sub agent greeting", "name", name)
 	logAgent2.Info("sub agent greeting", "name", name)
+
+	print(config.Get().LogFormat)
 }

@@ -2,12 +2,12 @@ package logger
 
 import (
 	"fmt"
-	config "github.com/johnny1110/evva/configs"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
-	"time"
+
+	config "github.com/johnny1110/evva/configs"
 )
 
 // Config holds logger configuration.
@@ -49,7 +49,7 @@ func New(cfg Config) (*slog.Logger, error) {
 	return slog.New(handler).With("agentId", cfg.AgentID), nil
 }
 
-// FromEnv constructs a logger from environment variables.
+// OfAgent constructs a logger from environment variables.
 //
 // Env vars:
 //
@@ -57,16 +57,21 @@ func New(cfg Config) (*slog.Logger, error) {
 //	LOG_FORMAT  — json | text                  (default: text)
 //	LOG_DIR     — directory path               (default: stdout)
 //	LOG_AGENT_ID — agent identifier            (default: "default")
-func FromEnv(agentID string) (*slog.Logger, error) {
+func OfAgent(parentID, agentID string) (*slog.Logger, error) {
 	cfg := config.Get()
 
-	if agentID == "" {
-		agentID = "default"
-	}
-
 	logDir := ""
+
 	if cfg.LogDir != nil {
-		logDir = *cfg.LogDir
+		isMain := parentID == ""
+		innerDir := parentID
+		if isMain {
+			innerDir = agentID
+		} else {
+			agentID = "sub_" + agentID
+		}
+
+		logDir = *cfg.LogDir + "/" + innerDir
 	}
 
 	return New(Config{
@@ -117,8 +122,7 @@ func resolveWriter(cfg Config) (io.Writer, error) {
 // UTC timestamp avoids timezone ambiguity across distributed nodes.
 // Go's reference time: Mon Jan 2 15:04:05 UTC 2006 → layout "20060102T150405Z"
 func buildFilename(agentID string) string {
-	ts := time.Now().UTC().Format("20060102T150405Z")
-	return agentID + "+" + ts + ".log"
+	return agentID + ".log"
 }
 
 func parseLevel(s string) slog.Level {

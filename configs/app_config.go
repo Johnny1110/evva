@@ -2,9 +2,11 @@ package config
 
 import (
 	"os"
-	"strings"
+	"runtime"
 	"sync"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 // AppConfig holds all parsed environment configuration.
@@ -12,6 +14,9 @@ import (
 // Pointer types (e.g. *string) represent "explicitly nullable" values:
 // nil means "not set / intentionally absent", distinguishing from "".
 type AppConfig struct {
+	// OS / runtime
+	OS string
+
 	// Logging
 	LogLevel  string  // default: "info"
 	LogFormat string  // default: "text"
@@ -21,6 +26,15 @@ type AppConfig struct {
 	AppEnv  string // default: "development"
 	AppName string // default: "app"
 
+	// Global config dir
+	GlobalCfgDir      string
+	GlobalSkillsDir   string
+	GlobalUserProfile string
+
+	// Work dir
+	WorkDir          string
+	WorkDirSkillsDir string
+
 	// Loaded metadata
 	LoadedAt time.Time
 }
@@ -29,6 +43,8 @@ var (
 	instance *AppConfig
 	once     sync.Once
 )
+
+const AppName = "evva"
 
 // Get returns the singleton AppConfig, initializing it on first call.
 // Safe for concurrent use — subsequent calls after the first are lock-free reads.
@@ -43,51 +59,39 @@ func Get() *AppConfig {
 // Isolated from Get() so it's independently testable:
 // call load() directly in tests without touching the singleton.
 func load() *AppConfig {
+	homeDir, _ := os.UserHomeDir()
+	var globalCfgDir string
+	if runtime.GOOS == "windows" {
+		globalCfgDir = homeDir + `\.` + AppName
+	} else {
+		globalCfgDir = homeDir + "/." + AppName
+	}
+
+	// load from .env
+	godotenv.Load(globalCfgDir + "/.env")
+
 	cfg := &AppConfig{
-		LogLevel:  getEnvDefault("LOG_LEVEL", "info"),
-		LogFormat: getEnvDefault("LOG_FORMAT", "text"),
+		AppName: AppName,
+		OS:      runtime.GOOS,
+		AppEnv:  getEnvDefaultLowerCase("APP_ENV", "dev"),
+
+		// log
+		LogLevel:  getEnvDefaultLowerCase("LOG_LEVEL", "info"),
+		LogFormat: getEnvDefaultLowerCase("LOG_FORMAT", "text"),
 		LogDir:    getEnvNullable("LOG_DIR"),
 
-		AppEnv:  getEnvDefault("APP_ENV", "dev"),
-		AppName: getEnvDefault("APP_NAME", "evva"),
+		// global config .evva
+		GlobalCfgDir:      globalCfgDir,
+		GlobalSkillsDir:   globalCfgDir + "/" + getEnvDefault("SKILLS_DIR", "skills"),
+		GlobalUserProfile: globalCfgDir + "/" + getEnvDefault("USER_PROFILE", "user_profile.md"),
 
-		LoadedAt: time.Now().UTC(),
+		LoadedAt: time.Now(),
 	}
 
-	// Normalize: lowercase for comparison safety downstream
-	cfg.LogLevel = strings.ToLower(cfg.LogLevel)
-	cfg.LogFormat = strings.ToLower(cfg.LogFormat)
-	cfg.AppEnv = strings.ToLower(cfg.AppEnv)
+	setupGlobalParam(cfg)
+	setupWorkDirParam(cfg)
 
 	return cfg
-}
-
-// getEnvDefault returns the env var value, or fallback if unset/empty.
-// Uses LookupEnv to distinguish "unset" from "set to empty string";
-// both are treated as "use default" here — empty string is not a valid value
-// for config fields like LOG_LEVEL.
-func getEnvDefault(key, fallback string) string {
-	val, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(val) == "" {
-		return fallback
-	}
-	return strings.TrimSpace(val)
-}
-
-// getEnvNullable returns nil if the var is unset or empty,
-// or a pointer to the trimmed value if present.
-// This preserves the semantic distinction:
-//
-//	nil   → "not configured, use default behavior"
-//	&""   → never returned (empty treated as nil)
-//	&"/var/log" → explicitly configured
-func getEnvNullable(key string) *string {
-	val, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(val) == "" {
-		return nil
-	}
-	trimmed := strings.TrimSpace(val)
-	return &trimmed
 }
 
 // IsDevelopment / IsProduction — semantic helpers so call sites

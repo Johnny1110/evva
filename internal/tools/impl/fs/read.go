@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"encoding/json"
+	"github.com/johnny1110/evva/internal/session"
 	"os"
 
 	"github.com/johnny1110/evva/internal/tools"
@@ -46,7 +47,7 @@ type readInput struct {
 	FilePath string `json:"file_path"`
 }
 
-func (t *ReadTool) Execute(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *ReadTool) Execute(_ context.Context, _ session.State, input json.RawMessage) (tools.Result, error) {
 	var in readInput
 	if err := json.Unmarshal(input, &in); err != nil {
 		return tools.Result{IsError: true, Content: err.Error()}, nil

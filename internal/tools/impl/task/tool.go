@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/johnny1110/evva/internal/session"
 
 	"github.com/johnny1110/evva/internal/tools"
 )
@@ -19,10 +20,7 @@ import (
 // --- TaskCreate -----------------------------------------------------------
 
 type CreateTool struct {
-	store *Store
 }
-
-func NewCreate(s *Store) *CreateTool { return &CreateTool{store: s} }
 
 func (t *CreateTool) Name() string { return string(tools.TASK_CREATE) }
 
@@ -46,17 +44,14 @@ func (t *CreateTool) Schema() json.RawMessage {
 	}`)
 }
 
-func (t *CreateTool) Execute(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+func (t *CreateTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (tools.Result, error) {
 	return notImplemented(tools.TASK_CREATE)
 }
 
 // --- TaskGet --------------------------------------------------------------
 
 type GetTool struct {
-	store *Store
 }
-
-func NewGet(s *Store) *GetTool { return &GetTool{store: s} }
 
 func (t *GetTool) Name() string { return string(tools.TASK_GET) }
 
@@ -76,17 +71,14 @@ func (t *GetTool) Schema() json.RawMessage {
 	}`)
 }
 
-func (t *GetTool) Execute(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+func (t *GetTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (tools.Result, error) {
 	return notImplemented(tools.TASK_GET)
 }
 
 // --- TaskList -------------------------------------------------------------
 
 type ListTool struct {
-	store *Store
 }
-
-func NewList(s *Store) *ListTool { return &ListTool{store: s} }
 
 func (t *ListTool) Name() string { return string(tools.TASK_LIST) }
 
@@ -103,17 +95,14 @@ func (t *ListTool) Schema() json.RawMessage {
 	}`)
 }
 
-func (t *ListTool) Execute(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+func (t *ListTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (tools.Result, error) {
 	return notImplemented(tools.TASK_LIST)
 }
 
 // --- TaskUpdate -----------------------------------------------------------
 
 type UpdateTool struct {
-	store *Store
 }
-
-func NewUpdate(s *Store) *UpdateTool { return &UpdateTool{store: s} }
 
 func (t *UpdateTool) Name() string { return string(tools.TASK_UPDATE) }
 
@@ -130,11 +119,11 @@ func (t *UpdateTool) Schema() json.RawMessage {
 		"required":["taskId"],
 		"properties":{
 			"taskId":{"type":"string","description":"The ID of the task to update"},
-			"status":{"description":"New status for the task","anyOf":[{"type":"string","enum":["pending","in_progress","completed"]},{"type":"string","constant":"deleted"}]},
-			"subject":{"type":"string","description":"New subject for the task"},
-			"description":{"type":"string","description":"New description for the task"},
+			"status":{"description":"NewSession status for the task","anyOf":[{"type":"string","enum":["pending","in_progress","completed"]},{"type":"string","constant":"deleted"}]},
+			"subject":{"type":"string","description":"NewSession subject for the task"},
+			"description":{"type":"string","description":"NewSession description for the task"},
 			"activeForm":{"type":"string","description":"Present continuous form shown in spinner when in_progress"},
-			"owner":{"type":"string","description":"New owner for the task"},
+			"owner":{"type":"string","description":"NewSession owner for the task"},
 			"addBlocks":{"type":"array","items":{"type":"string"},"description":"Task IDs that this task blocks"},
 			"addBlockedBy":{"type":"array","items":{"type":"string"},"description":"Task IDs that block this task"},
 			"metadata":{"type":"object","additionalProperties":{},"propertyNames":{"type":"string"},"description":"Metadata keys to merge into the task. Set a key to null to delete it."}
@@ -142,17 +131,14 @@ func (t *UpdateTool) Schema() json.RawMessage {
 	}`)
 }
 
-func (t *UpdateTool) Execute(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+func (t *UpdateTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (tools.Result, error) {
 	return notImplemented(tools.TASK_UPDATE)
 }
 
 // --- TaskOutput -----------------------------------------------------------
 
 type OutputTool struct {
-	store *Store
 }
-
-func NewOutput(s *Store) *OutputTool { return &OutputTool{store: s} }
 
 func (t *OutputTool) Name() string { return string(tools.TASK_OUTPUT) }
 
@@ -177,17 +163,14 @@ func (t *OutputTool) Schema() json.RawMessage {
 	}`)
 }
 
-func (t *OutputTool) Execute(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+func (t *OutputTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (tools.Result, error) {
 	return notImplemented(tools.TASK_OUTPUT)
 }
 
 // --- TaskStop -------------------------------------------------------------
 
 type StopTool struct {
-	store *Store
 }
-
-func NewStop(s *Store) *StopTool { return &StopTool{store: s} }
 
 func (t *StopTool) Name() string { return string(tools.TASK_STOP) }
 
@@ -206,7 +189,7 @@ func (t *StopTool) Schema() json.RawMessage {
 	}`)
 }
 
-func (t *StopTool) Execute(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+func (t *StopTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (tools.Result, error) {
 	return notImplemented(tools.TASK_STOP)
 }
 

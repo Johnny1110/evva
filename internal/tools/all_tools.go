@@ -86,5 +86,19 @@ const (
 const (
 	// this is for explore agent (read only)
 	GREP ToolName = "grep"
-	LS   ToolName = "ls"
+	TREE ToolName = "tree"
 )
+
+// ======================================================
+// Filter Support
+// ======================================================
+
+func All() []ToolName {
+	// TODO
+	return nil
+}
+
+func ReadOnly() []ToolName {
+	// TODO
+	return nil
+}

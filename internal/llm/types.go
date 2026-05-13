@@ -2,8 +2,8 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-
 	"github.com/johnny1110/evva/internal/tools"
 )
 
@@ -65,6 +65,12 @@ type Response struct {
 	ToolID   string
 }
 
+type Tool interface {
+	Name() string
+	Description() string
+	Schema() json.RawMessage
+}
+
 // Client abstracts the LLM provider so the agent loop never imports a concrete SDK.
 //
 // Cancellation contract: Complete MUST honor ctx and abort the in-flight request
@@ -74,7 +80,7 @@ type Response struct {
 type Client interface {
 	Name() string
 	Model() string
-	Complete(ctx context.Context, messages []Message, tools []tools.Tool) (Response, error)
+	Complete(ctx context.Context, messages []Message, tools []Tool) (Response, error)
 	// Apply tunes request parameters at runtime. Same options accepted by
 	// NewXxx — see WithSystem, WithTemperature, etc.
 	Apply(opts ...Option)

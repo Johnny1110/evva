@@ -28,12 +28,14 @@ type Agent struct {
 	// configuration
 	profile Profile
 
-	// llm + context (history)
-	llm     llm.Client
+	// llm client
+	llm llm.Client
+	// state + session (messages)
+	state   *session.State
 	session *session.Session
 
 	// tools registered from profile (standalone + skill-produced)
-	tools *tools.Registry
+	tools map[string]tools.Tool
 }
 
 // New constructs an agent with a fresh ID, a per-agent logger, and the given
@@ -54,7 +56,7 @@ func New(profile Profile) (*Agent, error) {
 	}
 
 	// init tools
-	toolRegistry, err := tools.NewRegistry(profile.Tools...)
+	toolRegistry, err := tools.GetTools(profile.Tools...)
 	if err != nil {
 		lgr.Error("agent: init tools registry failed", "error", err)
 		return nil, fmt.Errorf("agent: init tools: %w", err)
@@ -77,7 +79,8 @@ func New(profile Profile) (*Agent, error) {
 		logger:  lgr,
 		profile: profile,
 		llm:     llmClient,
-		session: session.New(),
+		session: session.NewSession(),
+		state:   session.NewState(),
 		tools:   toolRegistry,
 	}, nil
 }
@@ -90,7 +93,11 @@ func New(profile Profile) (*Agent, error) {
 func (a *Agent) Send(ctx context.Context, prompt string) (llm.Response, error) {
 	a.session.Append(llm.Message{Role: llm.RoleUser, Content: prompt})
 
-	registered := a.tools.All()
+	registered := []tools.Tool{}
+	for _, tool := range a.tools {
+		registered = append(registered, tool)
+	}
+
 	a.logger.Debug("llm call",
 		"profile", a.profile.Type.String(),
 		"messages", len(a.session.Messages),
@@ -121,8 +128,11 @@ func (a *Agent) Send(ctx context.Context, prompt string) (llm.Response, error) {
 // Session exposes the conversation history for inspection or TUI rendering.
 func (a *Agent) Session() *session.Session { return a.session }
 
+// State is agent runtime
+func (a *Agent) State() *session.State { return a.state }
+
 // Logger exposes the agent's logger so callers can emit records that share
-// the agent's structured context (agentId, log file routing).
+// the agent's structured session (agentId, log file routing).
 func (a *Agent) Logger() *slog.Logger { return a.logger }
 
 // Profile returns the profile this agent was constructed with.

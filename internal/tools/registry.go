@@ -2,28 +2,40 @@ package tools
 
 import "fmt"
 
-// Registry maps tool names to Tool implementations.
-// Built once at startup and injected into the agent — never mutated after init.
+// Registry maps tool names to Tool implementations. .
 type Registry struct {
-	tools map[string]Tool
+	tools map[ToolName]Tool
 }
 
-// NewRegistry expose ToolRegistry for agent.Agent
-func NewRegistry(tools ...ToolName) (*Registry, error) {
-	toolList, err := build(tools) // tool instance
-	if err != nil {
-		return nil, err
+var StaticToolRegistry = &Registry{
+	tools: make(map[ToolName]Tool),
+}
+
+// if create a new tool, mast register into this Registry.
+func Register(toolName ToolName, tool Tool) {
+	StaticToolRegistry.tools[toolName] = tool
+}
+
+// GetTools expose ToolRegistry for agent.Agent
+func GetTools(tools ...ToolName) (map[string]Tool, error) {
+	toolMap := make(map[string]Tool)
+	if len(tools) == 0 {
+		return toolMap, nil
 	}
 
-	r := &Registry{tools: make(map[string]Tool, len(tools))}
-	for _, t := range toolList {
-		r.tools[t.Name()] = t
+	for _, toolName := range tools {
+		instance, ok := StaticToolRegistry.tools[toolName]
+		if !ok {
+			return nil, fmt.Errorf("tool %s not found in StaticToolRegistry", toolName)
+		}
+		toolMap[string(toolName)] = instance
 	}
-	return r, nil
+
+	return toolMap, nil
 }
 
 func (r *Registry) Get(name string) (Tool, error) {
-	t, ok := r.tools[name]
+	t, ok := r.tools[ToolName(name)]
 	if !ok {
 		return nil, fmt.Errorf("tool %q not registered", name)
 	}

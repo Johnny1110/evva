@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/johnny1110/evva/internal/session"
 )
 
 // NewStub creates a Tool whose Execute always returns a "not implemented"
@@ -31,7 +32,7 @@ func (s *stubTool) Name() string            { return string(s.name) }
 func (s *stubTool) Description() string     { return s.desc }
 func (s *stubTool) Schema() json.RawMessage { return s.schema }
 
-func (s *stubTool) Execute(_ context.Context, _ json.RawMessage) (Result, error) {
+func (s *stubTool) Execute(_ context.Context, _ session.State, _ json.RawMessage) (Result, error) {
 	return Result{
 		IsError: true,
 		Content: fmt.Sprintf("tool %q is not implemented yet", s.name),

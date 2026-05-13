@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"encoding/json"
+	"github.com/johnny1110/evva/internal/session"
 	"os"
 
 	"github.com/johnny1110/evva/internal/tools"
@@ -42,7 +43,7 @@ type writeInput struct {
 	Content  string `json:"content"`
 }
 
-func (t *WriteTool) Execute(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *WriteTool) Execute(_ context.Context, _ session.State, input json.RawMessage) (tools.Result, error) {
 	var in writeInput
 	if err := json.Unmarshal(input, &in); err != nil {
 		return tools.Result{IsError: true, Content: err.Error()}, nil

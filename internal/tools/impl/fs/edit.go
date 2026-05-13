@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"encoding/json"
+	"github.com/johnny1110/evva/internal/session"
 	"os"
 	"strings"
 
@@ -49,7 +50,7 @@ type editInput struct {
 	ReplaceAll bool   `json:"replace_all"`
 }
 
-func (t *EditTool) Execute(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *EditTool) Execute(_ context.Context, _ session.State, input json.RawMessage) (tools.Result, error) {
 	var in editInput
 	if err := json.Unmarshal(input, &in); err != nil {
 		return tools.Result{IsError: true, Content: err.Error()}, nil

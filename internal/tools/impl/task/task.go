@@ -14,26 +14,21 @@ var taskNames = []tools.ToolName{
 	tools.TASK_STOP,
 }
 
+var CREATE tools.Tool = &CreateTool{}
+var GET tools.Tool = &GetTool{}
+var LIST tools.Tool = &ListTool{}
+var UPDATE tools.Tool = &UpdateTool{}
+var OUTPUT tools.Tool = &OutputTool{}
+var STOP tools.Tool = &StopTool{}
+
 func init() {
-	tools.RegisterGroup(tools.Group{
-		ToolNames: taskNames,
-		Build:     buildTaskTools,
-	})
+	tools.Register(tools.TASK_CREATE, CREATE)
+	tools.Register(tools.TASK_GET, GET)
+	tools.Register(tools.TASK_LIST, LIST)
+	tools.Register(tools.TASK_UPDATE, UPDATE)
+	tools.Register(tools.TASK_OUTPUT, OUTPUT)
+	tools.Register(tools.TASK_STOP, STOP)
 }
 
 // Names lists every tool name this package contributes.
 func Names() []tools.ToolName { return taskNames }
-
-// buildTaskTools allocates a fresh Store and returns the six task tools all
-// bound to it. Called once per tools.build, so each agent gets isolated state.
-func buildTaskTools() []tools.Tool {
-	s := NewStore()
-	return []tools.Tool{
-		NewCreate(s),
-		NewGet(s),
-		NewList(s),
-		NewUpdate(s),
-		NewOutput(s),
-		NewStop(s),
-	}
-}

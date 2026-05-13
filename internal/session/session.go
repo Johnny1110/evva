@@ -15,7 +15,7 @@ type Session struct {
 	fullCompactCount int
 }
 
-func New() *Session {
+func NewSession() *Session {
 	return &Session{}
 }
 

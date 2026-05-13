@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/internal/llm"
+	"github.com/johnny1110/evva/internal/tools"
 	"io"
 	"net/http"
 	"strings"
 
 	config "github.com/johnny1110/evva/configs"
-	"github.com/johnny1110/evva/internal/llm"
-	"github.com/johnny1110/evva/internal/tools"
 )
 
 const (
@@ -110,7 +110,7 @@ type apiResponse struct {
 
 // --- Client interface -----------------------------------------------------
 
-func (c *Client) Complete(ctx context.Context, messages []llm.Message, toolSet []tools.Tool) (llm.Response, error) {
+func (c *Client) Complete(ctx context.Context, messages []llm.Message, toolSet []llm.Tool) (llm.Response, error) {
 	if c.apiKey == "" {
 		return llm.Response{}, fmt.Errorf("claude: missing API key")
 	}
@@ -221,7 +221,7 @@ func toAPIMessages(msgs []llm.Message) []apiMessage {
 	return out
 }
 
-func toAPITools(toolSet []tools.Tool) []apiTool {
+func toAPITools(toolSet []llm.Tool) []apiTool {
 	if len(toolSet) == 0 {
 		return nil
 	}

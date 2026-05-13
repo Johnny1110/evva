@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"github.com/johnny1110/evva/internal/session"
 )
 
 // Tool is the contract every tool must satisfy.
@@ -13,7 +14,7 @@ type Tool interface {
 	Name() string
 	Description() string
 	Schema() json.RawMessage
-	Execute(ctx context.Context, input json.RawMessage) (Result, error)
+	Execute(ctx context.Context, state session.State, input json.RawMessage) (Result, error)
 }
 
 // Result is what every tool returns to the agent.

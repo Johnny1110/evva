@@ -22,6 +22,7 @@ package toolset
 import (
 	"fmt"
 
+	"github.com/johnny1110/evva/internal/session"
 	"github.com/johnny1110/evva/internal/tools"
 	"github.com/johnny1110/evva/internal/tools/cron"
 	"github.com/johnny1110/evva/internal/tools/fs"
@@ -47,6 +48,7 @@ type ToolState struct {
 	taskStore       *task.Store
 	subagentSpawner meta.SubagentSpawner
 	deferredLookup  meta.DeferredLookup
+	readTracker     *session.ReadTracker
 	// Future: monitorBus, cronService, skillLoader, ...
 }
 
@@ -85,6 +87,15 @@ func (s *ToolState) DeferredLookup() meta.DeferredLookup {
 // satisfies meta.DeferredLookup.
 func (s *ToolState) SetDeferredLookup(d meta.DeferredLookup) {
 	s.deferredLookup = d
+}
+
+// ReadTracker returns the session read-tracker shared by all fs tools,
+// allocating one on first use.
+func (s *ToolState) ReadTracker() *session.ReadTracker {
+	if s.readTracker == nil {
+		s.readTracker = &session.ReadTracker{}
+	}
+	return s.readTracker
 }
 
 // Describe returns the metadata (tools.Descriptor) for a tool name without
@@ -128,13 +139,13 @@ func Build(names []tools.ToolName, s *ToolState) ([]tools.Tool, error) {
 
 func buildOne(name tools.ToolName, s *ToolState) (tools.Tool, error) {
 	switch name {
-	// --- fs (stateless singletons) ---
+	// --- fs (stateful — share ReadTracker via ToolState) ---
 	case tools.READ_FILE:
-		return fs.Read, nil
+		return fs.NewRead(s.ReadTracker()), nil
 	case tools.WRITE_FILE:
-		return fs.Write, nil
+		return fs.NewWrite(s.ReadTracker()), nil
 	case tools.EDIT_FILE:
-		return fs.Edit, nil
+		return fs.NewEdit(s.ReadTracker()), nil
 
 	// --- shell (stateless) ---
 	case tools.BASH:

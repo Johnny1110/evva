@@ -6,9 +6,8 @@ import (
 )
 
 // Tool is the contract every tool must satisfy.
-// Stateless tools are typically package-level singletons (fs.Read, shell.Bash).
-// Stateful tools carry their backing state as struct fields, supplied by the
-// profile builder that constructs them.
+// Stateless tools are typically package-level singletons (shell.Bash).
+// Stateful tools receive backing state via constructor (fs.NewRead, task.NewCreate).
 type Tool interface {
 	Name() string
 	Description() string

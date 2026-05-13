@@ -1,6 +1,10 @@
 package session
 
-import "github.com/johnny1110/evva/internal/llm"
+import (
+	"path/filepath"
+
+	"github.com/johnny1110/evva/internal/llm"
+)
 
 // Session holds the live conversation history for a single agent run.
 // The agent appends every message (user, assistant, tool result) here so the
@@ -13,6 +17,29 @@ type Session struct {
 	microCompacted bool
 	// fullCompact: compress all session message (level-2 compact)
 	fullCompactCount int
+}
+
+// ReadTracker records file paths the agent has called read_file on.
+// Zero value is ready to use.
+type ReadTracker struct {
+	seen map[string]struct{}
+}
+
+// MarkRead records that path was read.
+func (t *ReadTracker) MarkRead(absPath string) {
+	if t.seen == nil {
+		t.seen = make(map[string]struct{})
+	}
+	t.seen[filepath.Clean(absPath)] = struct{}{}
+}
+
+// WasRead reports whether path has been marked via MarkRead.
+func (t *ReadTracker) WasRead(absPath string) bool {
+	if t.seen == nil {
+		return false
+	}
+	_, ok := t.seen[filepath.Clean(absPath)]
+	return ok
 }
 
 func New() *Session {

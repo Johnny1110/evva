@@ -1,8 +1,9 @@
 package config
 
 import (
-	"github.com/johnny1110/evva/internal/constant"
 	"os"
+
+	"github.com/johnny1110/evva/internal/constant"
 )
 
 // setupGlobalParam ensures the global config directories exist.

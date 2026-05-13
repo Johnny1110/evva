@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/johnny1110/evva/internal/constant"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/johnny1110/evva/internal/constant"
 
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/llm"
@@ -16,8 +17,8 @@ import (
 )
 
 const (
-	DefaultModel = "deepseek-chat"
-	chatPath     = "/v1/chat/completions"
+	DefaultModel = "deepseek-v4-flash"
+	chatPath     = "/chat/completions"
 )
 
 // Client implements llm.Client backed by DeepSeek's OpenAI-compatible chat API.
@@ -60,9 +61,9 @@ func (c *Client) SetModel(m string) { c.model = m }
 type apiMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
-	// ReasoningContent is populated by deepseek-reasoner on response only.
-	// It is intentionally never set on outbound messages — DeepSeek rejects
-	// requests that include reasoning_content in prior assistant turns.
+	// ReasoningContent is populated by deepseek-reasoner on response and
+	// MUST be echoed back in subsequent assistant turns in the same
+	// conversation — DeepSeek rejects requests that omit it in thinking mode.
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 	ToolCalls        []apiToolCall `json:"tool_calls,omitempty"`
@@ -191,7 +192,7 @@ func toAPIMessages(msgs []llm.Message, system string) []apiMessage {
 		case llm.RoleUser:
 			out = append(out, apiMessage{Role: "user", Content: m.Content})
 		case llm.RoleAssistant:
-			am := apiMessage{Role: "assistant", Content: m.Content}
+			am := apiMessage{Role: "assistant", Content: m.Content, ReasoningContent: m.Thinking}
 			if m.ToolCall != nil {
 				tc := apiToolCall{ID: m.ToolID, Type: "function"}
 				tc.Function.Name = m.ToolCall.Name

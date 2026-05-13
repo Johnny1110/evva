@@ -18,8 +18,8 @@ const (
 // that demand explicit pairing (Anthropic, OpenAI-style) can reconstruct it.
 //
 // Thinking is provider-specific reasoning text (currently only DeepSeek's
-// reasoning_content). It is display-only — the TUI may render it, but clients
-// MUST NOT echo it back in subsequent requests, since DeepSeek rejects that.
+// reasoning_content). The TUI may render it, and providers that require it
+// (e.g. DeepSeek in thinking mode) MUST echo it back in subsequent requests.
 type Message struct {
 	Role     Role
 	Content  string

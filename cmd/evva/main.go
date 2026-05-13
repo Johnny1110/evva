@@ -12,9 +12,9 @@ import (
 	"strings"
 	"syscall"
 
+	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent"
 	"github.com/johnny1110/evva/internal/agent/event"
-	"github.com/johnny1110/evva/internal/agent/profiles"
 	"github.com/johnny1110/evva/internal/constant"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/joho/godotenv"
@@ -31,10 +31,11 @@ import (
 // When the iteration cap is hit the user is prompted to press Enter to continue.
 func main() {
 	_ = godotenv.Load()
+	cfg := config.Get()
 
 	temp := flag.Float64("temp", -1, "sampling temperature (-1 → leave unset)")
 	maxTokens := flag.Int("max-tokens", 1024, "max output tokens (0 → provider default)")
-	maxIters := flag.Int("max-iters", agent.DefaultMaxIterations, "max loop iterations before pausing for Continue")
+	maxIters := flag.Int("max-iters", cfg.DefaultMaxIterations, "max loop iterations before pausing for Continue")
 	flag.Parse()
 
 	prompt, err := readPrompt(flag.Args())
@@ -45,7 +46,7 @@ func main() {
 		exitf(2, "usage: evva [-temp 0.7] [-max-tokens N] [-max-iters N] <prompt>")
 	}
 
-	prof := profiles.Main(constant.DEEPSEEK, constant.DEEPSEEK_V4_FLASH, buildOptions(*temp, *maxTokens))
+	prof := agent.Main(constant.DEEPSEEK, constant.DEEPSEEK_V4_FLASH, buildOptions(*temp, *maxTokens))
 	prof.SystemPrompt = "You are a helpful coding agent operating in a terminal. Use tools when they help."
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

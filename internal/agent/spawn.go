@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/johnny1110/evva/internal/agent/event"
+	//"github.com/johnny1110/evva/internal/agent/profiles"
 	"github.com/johnny1110/evva/internal/tools"
 	"github.com/johnny1110/evva/internal/tools/meta"
 )
@@ -76,32 +77,19 @@ func (a *Agent) Spawn(ctx context.Context, req meta.SpawnRequest) (string, error
 //
 // Unknown kinds are an error the caller surfaces to the model.
 func subagentProfile(parent Profile, kind string) (Profile, error) {
-	base := Profile{
-		LLMProvider: parent.LLMProvider,
-		LLMModel:    parent.LLMModel,
-		LLMOptions:  parent.LLMOptions,
-	}
+
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "explore":
-		base.Type = EXPLORE
-		base.SystemPrompt = "You are an Explore sub-agent. Inspect the codebase to answer the user's prompt. " +
-			"You are read-only — do not modify files. Cite file paths and line numbers in your answer. " +
-			"Return a concise summary, not a verbatim dump."
-		base.ActiveTools = []tools.ToolName{
-			tools.READ_FILE, tools.GREP, tools.TREE, tools.WEB_SEARCH,
-		}
+		return Explore(parent.LLMProvider, parent.LLMModel, parent.LLMOptions), nil
 	case "general-purpose", "general", "":
-		base.Type = GENERAL_PURPOSE
-		base.SystemPrompt = "You are a focused sub-agent. Complete the task described in the prompt and " +
-			"return a concise summary of what you did. Stay in scope."
-		base.ActiveTools = []tools.ToolName{
+		toolNames := []tools.ToolName{
 			tools.READ_FILE, tools.WRITE_FILE, tools.EDIT_FILE,
-			tools.BASH, tools.GREP, tools.TREE,
+			tools.BASH, tools.WEB_SEARCH, tools.WEB_FETCH,
 		}
+		return General(parent.LLMProvider, parent.LLMModel, parent.LLMOptions, toolNames...), nil
 	default:
 		return Profile{}, fmt.Errorf("unknown subagent_type %q (want \"explore\" or \"general-purpose\")", kind)
 	}
-	return base, nil
 }
 
 func emitSubagent(a *Agent, kind, summary string, phase event.SubagentPhase) {

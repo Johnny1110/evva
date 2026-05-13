@@ -6,13 +6,15 @@ import (
 	"log/slog"
 	"time"
 
+	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/llmfactory"
 	"github.com/johnny1110/evva/internal/logger"
 	"github.com/johnny1110/evva/internal/session"
-	"github.com/johnny1110/evva/internal/toolset"
 	"github.com/johnny1110/evva/internal/tools"
+	"github.com/johnny1110/evva/internal/tools/task"
+	"github.com/johnny1110/evva/internal/toolset"
 	"github.com/johnny1110/evva/pkg/common"
 )
 
@@ -53,6 +55,7 @@ type Agent struct {
 	toolState         *toolset.ToolState
 	active            map[string]tools.Tool
 	deferredAllowlist map[tools.ToolName]struct{}
+	exposeTools       []tools.Tool // for the llm call params
 
 	sink     event.Sink
 	parent   string
@@ -74,20 +77,23 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 
 	toolState := &toolset.ToolState{}
 
-	activeTools, err := toolset.Build(profile.ActiveTools, toolState)
+	exposeTools, err := toolset.Build(profile.ActiveTools, toolState)
 	if err != nil {
 		lgr.Error("agent: build active tools failed", "error", err)
 		return nil, fmt.Errorf("agent: build active tools: %w", err)
 	}
-	active := make(map[string]tools.Tool, len(activeTools))
-	for _, t := range activeTools {
+	active := make(map[string]tools.Tool, len(exposeTools))
+	for _, t := range exposeTools {
 		active[t.Name()] = t
 	}
 
 	deferred := make(map[tools.ToolName]struct{}, len(profile.DeferredTools))
 	for _, n := range profile.DeferredTools {
+		// empty at first, lazy loading when ResolveTool is called
 		deferred[n] = struct{}{}
 	}
+
+	cfg := config.Get()
 
 	a := &Agent{
 		ID:                ID,
@@ -97,8 +103,11 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 		toolState:         toolState,
 		active:            active,
 		deferredAllowlist: deferred,
-		maxIters:          DefaultMaxIterations,
+		exposeTools:       exposeTools,
+		maxIters:          cfg.DefaultMaxIterations,
 	}
+
+	// adapt options params
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -107,6 +116,7 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 	// the closure captures the final sink. TaskStore() lazy-allocates on
 	// first call; this also forces that allocation when tasks are in scope.
 	if a.hasAnyTaskTool() {
+		// mount event with toolState.TaskStore()
 		a.toolState.TaskStore().OnChange = func(id, status, subject string) {
 			a.emit(event.KindTaskUpdate, func(e *event.Event) {
 				e.TaskUpdate = &event.TaskUpdatePayload{
@@ -147,7 +157,7 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 func (a *Agent) Send(ctx context.Context, prompt string) (llm.Response, error) {
 	a.session.Append(llm.Message{Role: llm.RoleUser, Content: prompt})
 
-	exposed := a.exposedTools()
+	exposed := a.exposeTools
 	a.logger.Debug("llm call",
 		"profile", a.profile.Type.String(),
 		"messages", len(a.session.Messages),
@@ -286,39 +296,20 @@ func (a *Agent) emit(kind event.Kind, build func(*event.Event)) {
 	a.sink.Emit(e)
 }
 
-// exposedTools returns the current set of tools to advertise to the LLM —
-// every active tool plus any deferred tools that have been resolved.
-func (a *Agent) exposedTools() []tools.Tool {
-	out := make([]tools.Tool, 0, len(a.active))
-	for _, t := range a.active {
-		out = append(out, t)
-	}
-	return out
-}
-
 // hasAnyTaskTool reports whether the profile mentions any task tool —
 // either active or deferred. Used to decide whether wiring the task store's
 // OnChange hook is worth it. Agents with no task tools never need the
 // emit-bridge and skip the lazy TaskStore allocation entirely.
 func (a *Agent) hasAnyTaskTool() bool {
 	for _, n := range a.profile.ActiveTools {
-		if isTaskName(n) {
+		if task.IsTaskToolName(n) {
 			return true
 		}
 	}
 	for n := range a.deferredAllowlist {
-		if isTaskName(n) {
+		if task.IsTaskToolName(n) {
 			return true
 		}
-	}
-	return false
-}
-
-func isTaskName(n tools.ToolName) bool {
-	switch n {
-	case tools.TASK_CREATE, tools.TASK_GET, tools.TASK_LIST,
-		tools.TASK_UPDATE, tools.TASK_OUTPUT, tools.TASK_STOP:
-		return true
 	}
 	return false
 }

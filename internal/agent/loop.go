@@ -125,14 +125,13 @@ func (a *Agent) runLoop(ctx context.Context) (llm.Response, error) {
 
 // llmCall wraps llm.Complete with logging + event emission for failure modes.
 func (a *Agent) llmCall(ctx context.Context) (llm.Response, error) {
-	exposed := a.exposedTools()
 	a.logger.Debug("llm.call",
 		"profile", a.profile.Type.String(),
 		"messages", len(a.session.Messages),
-		"tools", len(exposed),
+		"tools", len(a.exposeTools),
 	)
 
-	resp, err := a.llm.Complete(ctx, a.session.Messages, exposed)
+	resp, err := a.llm.Complete(ctx, a.session.Messages, a.exposeTools)
 	if err != nil {
 		if errors.Is(err, llm.ErrInterrupted) {
 			a.emit(event.KindRunCancelled, nil)

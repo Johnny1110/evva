@@ -16,3 +16,12 @@ func Names() []tools.ToolName {
 		tools.TASK_STOP,
 	}
 }
+
+func IsTaskToolName(n tools.ToolName) bool {
+	switch n {
+	case tools.TASK_CREATE, tools.TASK_GET, tools.TASK_LIST,
+		tools.TASK_UPDATE, tools.TASK_OUTPUT, tools.TASK_STOP:
+		return true
+	}
+	return false
+}

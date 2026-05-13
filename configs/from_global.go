@@ -7,8 +7,8 @@ import (
 
 // setupGlobalParam ensures the global config directories exist.
 func setupGlobalParam(cfg *AppConfig) {
-	_ = os.MkdirAll(cfg.GlobalCfgDir, 0o755)
-	_ = os.MkdirAll(cfg.GlobalSkillsDir, 0o755)
+	_ = os.MkdirAll(cfg.EvvaHome, 0o755)
+	_ = os.MkdirAll(cfg.EvvaHomeSkillsDir, 0o755)
 }
 
 func setupLLMProviderConfig(cfg *AppConfig) {

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +17,15 @@ func getEnvDefault(key, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(val)
+}
+
+func getEnvDefaultInt(key, fallback string) int {
+	val := getEnvDefault(key, fallback)
+	num, err := strconv.Atoi(val)
+	if err != nil {
+		panic(fmt.Errorf("cannot parse %s as int: %v", key, err))
+	}
+	return num
 }
 
 func getEnvDefaultLowerCase(key, fallback string) string {

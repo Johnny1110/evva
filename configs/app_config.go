@@ -27,9 +27,9 @@ type AppConfig struct {
 	AppName string // default: "app"
 
 	// Global config dir
-	GlobalCfgDir      string
-	GlobalSkillsDir   string
-	GlobalUserProfile string
+	EvvaHome            string
+	EvvaHomeSkillsDir   string
+	EvvaHomeUserProfile string
 
 	// Work dir
 	WorkDir          string
@@ -40,6 +40,10 @@ type AppConfig struct {
 
 	// Loaded metadata
 	LoadedAt time.Time
+	// DefaultMaxIterations is the loop's safety cap. Hitting it emits a
+	// KindIterLimit event and pauses the agent; the caller may invoke
+	// Continue(ctx) to keep going.
+	DefaultMaxIterations int
 }
 
 var (
@@ -63,15 +67,15 @@ func Get() *AppConfig {
 // call load() directly in tests without touching the singleton.
 func load() *AppConfig {
 	homeDir, _ := os.UserHomeDir()
-	var globalCfgDir string
+	var EVVA_HOME string
 	if runtime.GOOS == "windows" {
-		globalCfgDir = homeDir + `\.` + AppName
+		EVVA_HOME = homeDir + `\.` + AppName
 	} else {
-		globalCfgDir = homeDir + "/." + AppName
+		EVVA_HOME = homeDir + "/." + AppName
 	}
 
 	// load from .env
-	godotenv.Load(globalCfgDir + "/.env")
+	godotenv.Load(EVVA_HOME + "/.env")
 
 	cfg := &AppConfig{
 		AppName: AppName,
@@ -84,9 +88,11 @@ func load() *AppConfig {
 		LogDir:    getEnvNullable("LOG_DIR"),
 
 		// global config .evva
-		GlobalCfgDir:      globalCfgDir,
-		GlobalSkillsDir:   globalCfgDir + "/" + getEnvDefault("SKILLS_DIR", "skills"),
-		GlobalUserProfile: globalCfgDir + "/" + getEnvDefault("USER_PROFILE", "user_profile.md"),
+		EvvaHome:            EVVA_HOME,
+		EvvaHomeSkillsDir:   EVVA_HOME + "/" + getEnvDefault("SKILLS_DIR", "skills"),
+		EvvaHomeUserProfile: EVVA_HOME + "/" + getEnvDefault("USER_PROFILE", "user_profile.md"),
+
+		DefaultMaxIterations: getEnvDefaultInt("DEFAULT_MAX_ITERATIONS", "25"),
 
 		LoadedAt: time.Now(),
 	}

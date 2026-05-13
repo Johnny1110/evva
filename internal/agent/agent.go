@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/johnny1110/evva/internal/llm/llmc"
 	"log/slog"
 
 	"github.com/johnny1110/evva/internal/llm"
@@ -63,7 +64,7 @@ func New(profile Profile) (*Agent, error) {
 	}
 
 	// init llm
-	llmClient, err := llm.Of(
+	llmClient, err := llmc.Of(
 		profile.LLMProvider,
 		profile.LLMModel,
 		profile.LLMOptions,

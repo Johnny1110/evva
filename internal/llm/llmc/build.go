@@ -1,14 +1,15 @@
-package llm
+package llmc
 
 import (
 	"fmt"
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/llm/claude"
 )
 
 // Of factory mode
-func Of(provider constant.LLMProvider, model constant.Model, opts []Option) (Client, error) {
+func Of(provider constant.LLMProvider, model constant.Model, opts []llm.Option) (llm.Client, error) {
 
 	cfg := config.Get()
 	api, ok := cfg.LLMProviderConfig[provider.Name]

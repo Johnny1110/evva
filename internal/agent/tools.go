@@ -81,6 +81,10 @@ func toolStateOnchangeEventBinding(a *Agent) {
 		bindTaskOnChange(a)
 	}
 
+	if a.hasAgentTool() {
+		bindAgentPanelOnChange(a)
+	}
+
 	// TODO Other tool state onchange event add here...
 }
 
@@ -92,6 +96,20 @@ func bindTaskOnChange(a *Agent) {
 				TaskID:  id,
 				Status:  status,
 				Subject: subject,
+			}
+		})
+	}
+}
+
+func bindAgentPanelOnChange(a *Agent) {
+	a.toolState.AgentGroupPanel().OnChange = func(id, agtype, psummary, rsummary string, phase int) {
+		a.emit(event.KindSubagent, func(e *event.Event) {
+			e.Subagent = &event.SubagentPayload{
+				SubagentID:    id,
+				AgentType:     agtype,
+				PromptSummary: psummary,
+				Phase:         event.SubagentPhase(phase),
+				ResultSummary: rsummary,
 			}
 		})
 	}
@@ -109,6 +127,15 @@ func (a *Agent) hasAnyTaskTool() bool {
 	}
 	for n := range a.deferredAllowlist {
 		if task.IsTaskToolName(n) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) hasAgentTool() bool {
+	for _, n := range a.profile.ActiveTools {
+		if n == tools.AGENT {
 			return true
 		}
 	}

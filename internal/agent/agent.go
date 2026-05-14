@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"github.com/johnny1110/evva/internal/constant"
 	"log/slog"
 	"time"
 
@@ -43,7 +44,9 @@ import (
 // agent and the root's AgentID for subagents — see Option AsSubagent.
 type Agent struct {
 	ID     string
+	Name   string
 	logger *slog.Logger
+	status constant.AgentStatus
 
 	profile Profile
 
@@ -58,6 +61,8 @@ type Agent struct {
 	sink     event.Sink // event to ui
 	parent   string
 	maxIters int //agent loop max iters
+
+	asyncMode bool
 }
 
 // New constructs an agent with a fresh ID, a per-agent logger, and the given
@@ -96,6 +101,7 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 	a := &Agent{
 		ID:                ID,
 		logger:            lgr,
+		status:            constant.INIT,
 		profile:           profile,
 		session:           session.New(),
 		toolState:         toolState,
@@ -105,7 +111,7 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 		maxIters:          cfg.DefaultMaxIterations,
 	}
 
-	// adapt options params (e.g. sink, maxIters, asSubAgent)
+	// adapt options params (e.g. name, sink, maxIters, asSubAgent)
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -140,6 +146,10 @@ func New(profile Profile, opts ...Option) (*Agent, error) {
 // The AGENT tool checks this to enforce the "subagents cannot spawn
 // subagents" invariant.
 func (a *Agent) IsSubagent() bool { return a.parent != "" }
+
+func (a *Agent) Status() constant.AgentStatus { return a.status }
+
+func (a *Agent) IsAsync() bool { return a.asyncMode }
 
 // Session exposes the conversation history for inspection or TUI rendering.
 func (a *Agent) Session() *session.Session { return a.session }

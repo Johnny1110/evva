@@ -53,6 +53,7 @@ func main() {
 	defer stop()
 
 	ag, err := agent.New(prof,
+		agent.WithName(cfg.AppName),
 		agent.WithSink(cliSink{out: os.Stdout}),
 		agent.WithMaxIterations(*maxIters),
 	)

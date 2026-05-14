@@ -49,16 +49,25 @@ const (
 type SubagentPhase int
 
 const (
-	SubagentStarted SubagentPhase = iota
+	SubagentInit SubagentPhase = iota
+	SubagentThinking
+	SubagentToolUse
+	SubagentIdle
 	SubagentEnded
 )
 
 func (p SubagentPhase) String() string {
 	switch p {
-	case SubagentStarted:
-		return "started"
+	case SubagentInit:
+		return "init"
+	case SubagentThinking:
+		return "thinking"
+	case SubagentToolUse:
+		return "tool_use"
+	case SubagentIdle:
+		return "idle"
 	case SubagentEnded:
-		return "ended"
+		return "done"
 	default:
 		return "unknown"
 	}
@@ -154,4 +163,5 @@ type SubagentPayload struct {
 	AgentType     string // "explore", "general", ...
 	PromptSummary string
 	Phase         SubagentPhase
+	ResultSummary string
 }

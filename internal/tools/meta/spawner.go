@@ -9,6 +9,7 @@ import (
 // run a subagent. Passed as a struct so future fields (model overrides,
 // timeout, isolation mode) don't churn the SubagentSpawner interface.
 type SpawnRequest struct {
+	Name string
 	// Kind selects a preset profile: "explore" or "general-purpose".
 	// Empty/unknown values are the spawner's responsibility (return an error).
 	Kind string
@@ -17,11 +18,14 @@ type SpawnRequest struct {
 	Prompt string
 
 	// Level selects the model tier within the parent's provider:
-	//   1 = normal (smaller model — Sonnet, DeepSeek-Flash, ...).
-	//   2 = big   (larger model — Opus, DeepSeek-Pro, ...).
+	//   1 = small  (smaller model — Sonnet, DeepSeek-Flash, ...).
+	//   2 = medium (larger model — Opus, DeepSeek-Pro, ...).
+	//   3 = Large  (larger model — Opus + hard effort, DeepSeek-Pro  + hard effort, ...).
 	// Zero defaults to 1; out-of-range values clamp via
 	// constant.LLMProvider.ModelForLevel.
 	Level int
+
+	AsyncMode bool // default = false
 }
 
 // SubagentSpawner is the agent-layer dependency that the AGENT tool calls

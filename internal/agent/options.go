@@ -18,6 +18,18 @@ func WithSink(s event.Sink) Option {
 	}
 }
 
+func WithName(name string) Option {
+	return func(a *Agent) {
+		a.Name = name
+	}
+}
+
+func WithAsync(async bool) Option {
+	return func(a *Agent) {
+		a.asyncMode = async
+	}
+}
+
 // WithMaxIterations overrides DefaultMaxIterations. Pass 0 to use the
 // default. Negative values are clamped to 1 (single-turn).
 func WithMaxIterations(n int) Option {

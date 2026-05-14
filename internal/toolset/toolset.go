@@ -48,6 +48,7 @@ type ToolState struct {
 	subagentSpawner meta.SubagentSpawner
 	deferredLookup  meta.DeferredLookup
 	readTracker     *fs.ReadTracker
+	subAgentGroup   *meta.SpawnGroup
 	// Future: monitorBus, cronService, skillLoader, ...
 }
 
@@ -95,6 +96,13 @@ func (s *ToolState) ReadTracker() *fs.ReadTracker {
 		s.readTracker = fs.NewReadTracker()
 	}
 	return s.readTracker
+}
+
+func (s *ToolState) AgentGroupPanel() *meta.SpawnGroup {
+	if s.subAgentGroup == nil {
+		s.subAgentGroup = meta.NewSpawnGroup()
+	}
+	return s.subAgentGroup
 }
 
 // Describe returns the metadata (tools.Descriptor) for a tool name without
@@ -159,7 +167,7 @@ func buildOne(name tools.ToolName, s *ToolState) (tools.Tool, error) {
 		// Lookup is late-bound: the agent installs itself via
 		// SetSubagentSpawner after construction, and meta.AgentTool reads
 		// through s.SubagentSpawner at Execute time.
-		return meta.NewAgent(s.SubagentSpawner), nil
+		return meta.NewAgent(s.SubagentSpawner, s.AgentGroupPanel()), nil
 	case tools.TOOL_SEARCH:
 		// Same late-binding pattern as AGENT — the agent installs itself
 		// as the deferred lookup via SetDeferredLookup after construction.

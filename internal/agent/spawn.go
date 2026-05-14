@@ -44,17 +44,26 @@ func (a *Agent) Spawn(ctx context.Context, req meta.SpawnRequest) (string, error
 	subProfile.LLMModel = a.profile.LLMProvider.ModelForLevel(req.Level)
 
 	childSink := event.BubbleUp{Parent: a.Sink(), ParentID: a.ID}
-	// new agent
-	child, err := New(subProfile, WithSink(childSink), AsSubagent(a.ID), WithMaxIterations(a.maxIters))
+	// new a sub agent
+	child, err := New(subProfile,
+		WithName(req.Name),
+		WithSink(childSink),
+		AsSubagent(a.ID),
+		WithMaxIterations(a.maxIters),
+		WithAsync(req.AsyncMode),
+	)
 	if err != nil {
 		return "", fmt.Errorf("spawn: new agent: %w", err)
 	}
 
 	summary := truncateSummary(req.Prompt, 100)
 
+	a.ToolState().AgentGroupPanel().Add()
+
 	// ------------------------------------------------------------
-	emitSubagent(child, req.Kind, summary, event.SubagentStarted)
-	// TODO: In evva v2.0 support sync/async agent mode as new feature.
+	emitSubagent(child, req.Kind, summary, event.SubagentInit)
+	// TODO: In evva v2.0 support sync/async agent mode as new feature, if req.AsyncMode = true
+	// update subagent status in toolState
 	resp, runErr := child.Run(ctx, req.Prompt)
 	emitSubagent(child, req.Kind, summary, event.SubagentEnded)
 	// ------------------------------------------------------------

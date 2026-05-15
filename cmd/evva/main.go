@@ -54,7 +54,7 @@ func main() {
 
 	useTUI := !*noTUI && isTTY(os.Stdout)
 	if useTUI {
-		runTUI(ctx, prof, *maxIters, cfg.AppName)
+		runTUI(ctx, prof, *maxIters, cfg.AppName, cfg.EvvaHome)
 		return
 	}
 	runCLI(ctx, prof, *maxIters, cfg.AppName)
@@ -62,8 +62,9 @@ func main() {
 
 // runTUI is the interactive path. The bubbletea UI owns the screen; the
 // agent emits events into it; the user drives prompts from the textarea.
-func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name string) {
-	tui := bubbletea.New()
+// evvaHome lets the TUI resolve banner.txt (and any future user config).
+func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHome string) {
+	tui := bubbletea.New(evvaHome)
 	ag, err := agent.New(nil, prof,
 		agent.WithName(name),
 		agent.WithSink(tui),

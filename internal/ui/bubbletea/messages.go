@@ -22,3 +22,9 @@ type runDoneMsg struct {
 // separate from tea.Quit so we can run any final cleanup in Update
 // (cancel in-flight agent run, drain logs) before returning tea.Quit.
 type quitMsg struct{}
+
+// spinnerTickMsg drives the braille-dot spinner animation. Update
+// increments the frame counter and schedules the next tick so the
+// status bar and subagent panel keep cycling. The tick is also the
+// re-render heartbeat for time-sensitive UI elements.
+type spinnerTickMsg struct{}

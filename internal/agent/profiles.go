@@ -124,7 +124,7 @@ func Main(provider constant.LLMProvider, model constant.Model, options []llm.Opt
 		LLMProvider: provider,
 		LLMModel:    model,
 		LLMOptions:  options,
-		Stream:      true,
+		Stream:      false,
 	}
 }
 

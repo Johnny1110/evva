@@ -167,6 +167,10 @@ func New(parent *Agent, profile Profile, opts ...Option) (*Agent, error) {
 	return a, nil
 }
 
+func (a *Agent) AgentID() string {
+	return a.ID
+}
+
 func (a *Agent) ParentID() string {
 	if a.Parent != nil {
 		return a.ID
@@ -192,6 +196,16 @@ func (a *Agent) Logger() *slog.Logger { return a.logger }
 
 // Profile returns the profile this agent was constructed with.
 func (a *Agent) Profile() Profile { return a.profile }
+
+// Model returns the model id the agent's LLM client is bound to.
+// Wraps llm.Client.Model() so the ui.Controller interface stays
+// independent of the llm package. Empty when no client is attached.
+func (a *Agent) Model() string {
+	if a.llm == nil {
+		return ""
+	}
+	return a.llm.Model()
+}
 
 // ToolState exposes the shared state container so the TUI / session-persist
 // layer can read tool state through typed accessors (e.g. TaskStore.List()).

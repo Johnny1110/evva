@@ -71,6 +71,12 @@ panel, or a new UI implementation should each cost roughly one package.
   cumulative tokens, smart Ctrl+C (cancel run vs quit).
 - `-no-tui` flag falls back to a plain-text CLI sink for pipes and CI.
 
+**Streaming completions** (chunked text + thinking).
+
+**2-level compaction**
+  - micro: compress tool-result blocks when context budget approaches threshold.
+  - full: summarize the whole session into a single assistant brief.
+
 ## Project structure
 
 ```
@@ -138,12 +144,18 @@ OLLAMA_URL=http://localhost:11434
 ## Roadmap
 
 ### In progress / next up
-- Streaming completions (chunked text + thinking).
-- 2-level compaction:
-  - micro: compress tool-result blocks when context budget approaches threshold.
-  - full: summarize the whole session into a single assistant brief.
-- TUI: surface model name + provider in the status bar (extend `Controller`).
-- TUI: optional markdown rendering of assistant text (behind a config flag).
+
+- Systemprompt:
+  - main
+  - explore
+  - general-purpose
+  - agent-specific
+
+- Tool implementations:
+  - `tasks` (spawn sub-agents)
+  - `tool_search` (lazy-load deferred tool schemas)
+  - `skill` (invoke user-defined skills)
+
 
 ### Planned
 - **Multimodal Read**: images, PDFs (with `pages` range), Jupyter notebooks.

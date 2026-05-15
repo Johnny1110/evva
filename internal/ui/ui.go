@@ -76,4 +76,13 @@ type Controller interface {
 	// Logger exposes the agent's structured logger so the UI can emit
 	// records that share its context.
 	Logger() *slog.Logger
+
+	// Model returns the model id the agent is currently bound to.
+	// Used by the TUI's status header; falls back to "-" when empty.
+	Model() string
+
+	// AgentID returns the controller's agent identifier so the UI can
+	// surface it in headers / banners. Cheap accessor; safe to call
+	// every render.
+	AgentID() string
 }

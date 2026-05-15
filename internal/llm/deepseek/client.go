@@ -60,9 +60,17 @@ func (c *Client) SetModel(m string) { c.model = m }
 
 // --- API wire types -------------------------------------------------------
 
+// apiMessage mirrors the OpenAI chat-completions message shape.
+//
+// Content is intentionally NOT tagged omitempty: DeepSeek validates the
+// request body with strict deserialization and rejects an assistant
+// message that only carries tool_calls if the `content` field is
+// missing ("Failed to deserialize ... missing field `content`").
+// Sending an explicit empty string keeps the field present while
+// signalling "no textual content this turn".
 type apiMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content,omitempty"`
+	Content string `json:"content"`
 	// ReasoningContent is populated by deepseek-reasoner on response and
 	// MUST be echoed back in subsequent assistant turns in the same
 	// conversation — DeepSeek rejects requests that omit it in thinking mode.

@@ -139,6 +139,34 @@ func (s *TaskGroup) List() []Task {
 	return out
 }
 
+// Clear removes every task from the store and emits a "removed" change
+// per task so observers (TUI panels, structured loggers, ...) can collapse
+// their views in lockstep. Used by the TUI's auto-fold behavior — when
+// every task has reached StatusCompleted the panel folds the snapshot
+// into the transcript and calls Clear to wipe the live state. Safe to
+// call on an empty store (no-op).
+func (s *TaskGroup) Clear() {
+	s.mu.Lock()
+	removed := make([]Task, 0, len(s.order))
+	for _, id := range s.order {
+		if t, ok := s.tasks[id]; ok {
+			removed = append(removed, *t)
+		}
+	}
+	s.tasks = make(map[string]*Task)
+	s.order = nil
+	s.mu.Unlock()
+
+	for _, t := range removed {
+		s.Notify(observable.Change{
+			Domain:  Domain,
+			Op:      "removed",
+			ID:      t.ID,
+			Payload: Summary{Status: string(t.Status), Subject: t.Subject},
+		})
+	}
+}
+
 // UpdatePatch carries optional field updates. Pointer fields preserve the
 // "unset means leave alone" semantic so a partial update doesn't clobber
 // fields the caller didn't mention.

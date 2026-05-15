@@ -5,50 +5,398 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
+	"github.com/muesli/reflow/wrap"
+
 	"github.com/johnny1110/evva/internal/agent/event"
 	"github.com/johnny1110/evva/internal/tools/fs"
 )
 
-// transcript accumulates a scrollback buffer of human-readable lines from
-// the agent's event stream. It is intentionally view-only: foldEvent
-// appends pre-styled strings; the parent model is responsible for
-// rendering them inside a viewport.
+// blockKind tags a transcript entry so String() knows how to draw the
+// timeline gutter — assistant text and tool blocks live on the timeline,
+// user prompts cut it, the banner sits outside it.
+type blockKind int
+
+const (
+	blockBanner       blockKind = iota
+	blockUserPrompt             // cuts the timeline
+	blockText                   // assistant text / markdown
+	blockThinking               // dim reasoning text
+	blockTool                   // tool_use_start, possibly with result attached
+	blockSystem                 // compacting, draining, etc.
+	blockError                  // KindError red banner
+	blockSynthetic              // pre-formatted block injected by the UI
+)
+
+// transcriptBlock is one logical entry in the scrollback. content is the
+// already-styled string; the kind decides the gutter prefix; toolID is
+// only used for blockTool so the result event can find its start.
+type transcriptBlock struct {
+	kind    blockKind
+	content string
+	toolID  string
+}
+
+// transcript accumulates the scrollback the user reads in the viewport.
 //
-// Each entry is one logical "block" (a user prompt, an assistant text
-// turn, a single tool call + result, an error banner, ...). Blocks may
-// contain internal newlines.
+// Three behaviors above the obvious append:
 //
-// Streaming chunks (KindTextChunk / KindThinkingChunk) accumulate into a
-// single in-flight block per kind — textInflightIdx / thinkingInflightIdx
-// track which scrollback entry to append into. Both reset to -1 on
-// KindTurnEnd so the next assistant turn starts fresh blocks. They also
-// reset whenever a buffered KindText / KindThinking arrives, so a single
-// turn never produces both a streamed block and a buffered duplicate.
+//   - Streaming chunk coalescing: KindTextChunk / KindThinkingChunk
+//     append into a single in-flight block via textInflightIdx /
+//     thinkingInflightIdx. Any non-chunk event resets the markers.
+//
+//   - Tool pairing: KindToolUseStart appends a block keyed by ToolID;
+//     KindToolUseResult finds the same block and folds the result line
+//     into it so each call renders as one "use → result" unit even when
+//     dispatched in parallel.
+//
+//   - Timeline rendering: String() draws a git-style gutter down the
+//     left side. User prompts cut the line (separator + bullet); tool
+//     blocks branch with ├─; everything else flows along │.
 type transcript struct {
-	blocks              []string
+	blocks              []transcriptBlock
 	textInflightIdx     int
 	thinkingInflightIdx int
-	// rawText holds the unstyled accumulator for the in-flight text block.
-	// Lipgloss re-styles the full string every chunk; without keeping the
-	// raw text around we'd recurse styling on already-styled output.
-	rawText     string
-	rawThinking string
+	rawText             string
+	rawThinking         string
+	// toolBlocks maps ToolID → block index so KindToolUseResult can
+	// attach the result line to the matching KindToolUseStart block.
+	toolBlocks map[string]int
+	// md renders assistant content blocks (KindText / KindTextChunk)
+	// as markdown. Width is re-set on every viewport resize so wrapping
+	// tracks the layout.
+	md *markdownRenderer
+	// width is the column count String() uses to size the user-prompt
+	// separator and any other width-aware glyphs. Updated by setWidth.
+	width int
+	// banner holds the raw inputs for the welcome block. Stored
+	// separately from blocks so the rendered representation can be
+	// recomputed (recentered, restyled) on every resize without
+	// losing the source data.
+	banner bannerSpec
+	// bannerIdx is the index of the rendered banner block inside
+	// blocks, or -1 when no banner is active. Used by reflowBanner
+	// to swap the styled string on resize / metadata change.
+	bannerIdx int
+}
+
+// bannerSpec captures everything the welcome block displays: the ASCII
+// art, the greeting, and per-session metadata (agent id, model, start
+// time) rendered as labeled rows below the greeting. Empty fields are
+// silently omitted, so the spec is safe to populate incrementally as
+// the UI learns about its controller.
+type bannerSpec struct {
+	Art      string
+	Greeting string
+	Info     []bannerInfoRow
+}
+
+// bannerInfoRow is a single labeled row in the banner footer (e.g.
+// `agent · a97f34ac…`). Label is dimmed, Value is bright so the eye
+// lands on the changing data.
+type bannerInfoRow struct {
+	Label string
+	Value string
 }
 
 // String returns the entire scrollback as one newline-joined buffer.
+// Each block contributes its rendered content with a timeline prefix
+// applied to every line; blocks are separated by a blank gutter line.
 func (t *transcript) String() string {
-	return strings.Join(t.blocks, "\n\n")
+	if len(t.blocks) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for i, b := range t.blocks {
+		if i > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(t.renderWithTimeline(b))
+		// Blank gutter line between blocks. User prompts already emit
+		// their own separator above, so skip the spacer after them to
+		// avoid double padding.
+		if i < len(t.blocks)-1 {
+			out.WriteByte('\n')
+			out.WriteString(t.gutterLine(b, t.blocks[i+1]))
+		}
+	}
+	return out.String()
 }
 
-// appendUserPrompt records a prompt the user just submitted.
+// renderWithTimeline prefixes every line of the block's content with
+// the right gutter glyph for its kind. Banner / user-prompt blocks are
+// emitted verbatim — they sit outside the timeline column.
+func (t *transcript) renderWithTimeline(b transcriptBlock) string {
+	switch b.kind {
+	case blockBanner:
+		return b.content
+	case blockUserPrompt:
+		return t.renderUserPrompt(b.content)
+	case blockTool:
+		return t.applyToolGutter(b.content)
+	default:
+		return t.applyLineGutter(b.content)
+	}
+}
+
+// gutterLine emits the blank-line spacer between two blocks. It picks
+// either a plain pipe (continuation) or empty (when the next block is
+// a user prompt that will draw its own separator).
+func (t *transcript) gutterLine(cur, next transcriptBlock) string {
+	if next.kind == blockUserPrompt {
+		// The prompt draws its own separator above its body — no
+		// extra gutter pipe needed.
+		return ""
+	}
+	if cur.kind == blockBanner {
+		return ""
+	}
+	return styles.Timeline.Render("│")
+}
+
+// applyLineGutter prepends "│ " to every line of s. Long lines are
+// word-wrapped to (t.width - 2) first so the viewport never has to
+// horizontal-clip; the 2-col reserve covers the gutter glyph + space.
+func (t *transcript) applyLineGutter(s string) string {
+	if s == "" {
+		return styles.Timeline.Render("│")
+	}
+	pipe := styles.Timeline.Render("│") + " "
+	lines := strings.Split(wrapForWidth(s, t.width-2), "\n")
+	for i, line := range lines {
+		lines[i] = pipe + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// applyToolGutter prefixes the first line with "├─" (the branch-out
+// connector) and subsequent lines with "│  " so the body sits in line
+// with the connector's arm. Content wraps to (width - 3) — gutter is
+// 3 cols wide here ("├─ " / "│  ").
+func (t *transcript) applyToolGutter(s string) string {
+	if s == "" {
+		return styles.Timeline.Render("├─")
+	}
+	branch := styles.Timeline.Render("├─") + " "
+	pipe := styles.Timeline.Render("│") + "  "
+	lines := strings.Split(wrapForWidth(s, t.width-3), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			lines[i] = branch + line
+		} else {
+			lines[i] = pipe + line
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wrapForWidth word-wraps s to w columns and falls back to a forced
+// character wrap for any line whose content still exceeds w after the
+// word-wrap pass (a single token longer than the column, like a long
+// URL or a wide code identifier). Both passes are ANSI-aware so styled
+// segments survive intact.
+func wrapForWidth(s string, w int) string {
+	if w < 5 {
+		return s
+	}
+	wrapped := wordwrap.String(s, w)
+	return wrap.String(wrapped, w)
+}
+
+// renderUserPrompt draws a separator-and-bullet header so the prompt
+// reads as a hard break between conversation rounds, then the prompt
+// body wrapped to the transcript column so long pasted lines don't
+// get horizontally clipped by the viewport.
+func (t *transcript) renderUserPrompt(body string) string {
+	width := t.width
+	if width < 20 {
+		width = 20
+	}
+	sep := strings.Repeat("─", width-2)
+	return styles.Timeline.Render("●─"+sep) + "\n" + wrapForWidth(body, width)
+}
+
+// setWidth installs (or re-installs) the markdown renderer for the
+// given column width and records the width for separator sizing.
+// Called from the model's layout pass on every terminal resize. Also
+// re-flows the banner block so its centering tracks the new width.
+func (t *transcript) setWidth(width int) {
+	if width == t.width {
+		return
+	}
+	t.width = width
+	mdWidth := width - 2
+	if mdWidth < 20 {
+		mdWidth = 20
+	}
+	if t.md == nil || t.md.width != mdWidth {
+		t.md = newMarkdownRenderer(mdWidth)
+	}
+	t.reflowBanner()
+}
+
+// renderAssistant returns the markdown-rendered version of an assistant
+// text block, falling back to plain Assistant styling if glamour isn't
+// available yet (e.g. before the first layout pass).
+func (t *transcript) renderAssistant(s string) string {
+	if t.md == nil {
+		return styles.Assistant.Render(s)
+	}
+	return t.md.Render(s)
+}
+
+// setBanner stores the welcome-block spec and renders (or re-renders)
+// the corresponding transcript block. Called from newRootModel with
+// just the ASCII art + greeting, and again from Attach once the agent's
+// metadata (id, model, start time) is known. Safe to call repeatedly;
+// always operates on the same block slot, so the banner never
+// duplicates itself.
+func (t *transcript) setBanner(spec bannerSpec) {
+	t.banner = spec
+	t.reflowBanner()
+}
+
+// reflowBanner builds (or rebuilds) the styled banner block from the
+// stored spec and slots it at t.bannerIdx, creating the slot if this
+// is the first call. Width-dependent — re-invoked from setWidth on
+// every resize so the centering tracks the terminal.
+func (t *transcript) reflowBanner() {
+	content := t.renderBannerContent()
+	if content == "" {
+		// Nothing to show — release the slot if we previously held one.
+		if t.bannerIdx >= 0 && t.bannerIdx < len(t.blocks) {
+			t.blocks = append(t.blocks[:t.bannerIdx], t.blocks[t.bannerIdx+1:]...)
+		}
+		t.bannerIdx = -1
+		return
+	}
+	block := transcriptBlock{kind: blockBanner, content: content}
+	if t.bannerIdx < 0 || t.bannerIdx >= len(t.blocks) {
+		t.blocks = append([]transcriptBlock{block}, t.blocks...)
+		t.bannerIdx = 0
+		return
+	}
+	t.blocks[t.bannerIdx] = block
+}
+
+// renderBannerContent builds the styled banner block from t.banner:
+// rounded border around the art + greeting + info rows, then centered
+// horizontally inside the transcript column. Returns "" when the spec
+// is empty so callers can detect "no banner to show".
+func (t *transcript) renderBannerContent() string {
+	art := strings.TrimRight(t.banner.Art, "\n")
+	greeting := strings.TrimSpace(t.banner.Greeting)
+	rows := t.banner.Info
+
+	if art == "" && greeting == "" && len(rows) == 0 {
+		return ""
+	}
+
+	var inner strings.Builder
+	if art != "" {
+		inner.WriteString(styles.Banner.Render(art))
+	}
+	if greeting != "" {
+		if inner.Len() > 0 {
+			inner.WriteString("\n\n")
+		}
+		inner.WriteString(styles.Greeting.Render(greeting))
+	}
+	if len(rows) > 0 {
+		if inner.Len() > 0 {
+			inner.WriteString("\n\n")
+		}
+		inner.WriteString(renderBannerInfo(rows))
+	}
+
+	box := styles.BannerBox.Render(inner.String())
+	if t.width <= 0 {
+		return box
+	}
+	return lipgloss.PlaceHorizontal(t.width, lipgloss.Center, box)
+}
+
+// renderBannerInfo lays out the labeled metadata rows beneath the
+// greeting. Labels are right-padded to the longest label width so the
+// values line up in a single column — easier to scan than a free-flow
+// "label: value" list.
+func renderBannerInfo(rows []bannerInfoRow) string {
+	maxLabel := 0
+	for _, r := range rows {
+		if len(r.Label) > maxLabel {
+			maxLabel = len(r.Label)
+		}
+	}
+	var b strings.Builder
+	for i, r := range rows {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		label := r.Label + strings.Repeat(" ", maxLabel-len(r.Label))
+		b.WriteString(styles.DimText.Render(label))
+		b.WriteString("  ")
+		b.WriteString(styles.StatusValue.Render(r.Value))
+	}
+	return b.String()
+}
+
+// appendUserPrompt records a prompt the user just submitted. Resets
+// in-flight streaming so the prompt and the next assistant turn each
+// get their own block. Also clears the tool-block map: tool IDs from
+// the previous turn are gone, and a stale entry could cause the next
+// turn's result to attach to the wrong block.
+//
+// Embedded ANSI escapes (paste boundary markers) survive intact:
+// styling is applied per-line, and lines that already carry escapes
+// are passed through verbatim.
 func (t *transcript) appendUserPrompt(text string) {
 	t.resetInflight()
-	t.blocks = append(t.blocks, styles.UserPrompt.Render("> "+text))
+	t.toolBlocks = nil
+	t.blocks = append(t.blocks, transcriptBlock{
+		kind:    blockUserPrompt,
+		content: styleUserPromptLines(text),
+	})
 }
 
-// resetInflight closes the active streamed text/thinking blocks so the next
-// chunk starts a fresh entry. Called whenever a non-chunk event interrupts
-// the stream (turn end, tool call, error, user prompt, buffered text).
+// styleUserPromptLines applies UserPrompt styling line-by-line so the
+// `> ` head sits on row 0 and any lines that already carry ANSI codes
+// (paste boundary chips, etc.) flow through without re-styling that
+// would clobber their colors.
+func styleUserPromptLines(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.ContainsRune(line, 0x1b) {
+			if i == 0 {
+				lines[i] = styles.UserPrompt.Render("> ") + line
+			}
+			// Already styled — leave intact.
+			continue
+		}
+		if i == 0 {
+			lines[i] = styles.UserPrompt.Render("> " + line)
+		} else {
+			lines[i] = styles.UserPrompt.Render(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// appendBlock appends a pre-styled block verbatim. Used by the UI to
+// inject synthetic blocks (e.g. the all-tasks-complete snapshot).
+func (t *transcript) appendBlock(block string) {
+	if block == "" {
+		return
+	}
+	t.resetInflight()
+	t.blocks = append(t.blocks, transcriptBlock{
+		kind:    blockSynthetic,
+		content: block,
+	})
+}
+
+// resetInflight closes the active streamed text/thinking blocks so the
+// next chunk starts a fresh entry.
 func (t *transcript) resetInflight() {
 	t.textInflightIdx = -1
 	t.thinkingInflightIdx = -1
@@ -57,20 +405,26 @@ func (t *transcript) resetInflight() {
 }
 
 // foldEvent translates one agent event into a transcript entry (or
-// updates an in-flight one). Returns true if the transcript changed and
-// the viewport should re-render.
+// updates an in-flight one). Returns true if the transcript changed
+// and the viewport should re-render.
 func (t *transcript) foldEvent(e event.Event) bool {
 	switch e.Kind {
 	case event.KindThinking:
 		t.resetInflight()
 		if e.Thinking != nil && e.Thinking.Text != "" {
-			t.blocks = append(t.blocks, styles.Thinking.Render("· "+truncate(e.Thinking.Text, 800)))
+			t.blocks = append(t.blocks, transcriptBlock{
+				kind:    blockThinking,
+				content: styles.Thinking.Render("· " + e.Thinking.Text),
+			})
 			return true
 		}
 	case event.KindText:
 		t.resetInflight()
 		if e.Text != nil && e.Text.Text != "" {
-			t.blocks = append(t.blocks, styles.Assistant.Render(e.Text.Text))
+			t.blocks = append(t.blocks, transcriptBlock{
+				kind:    blockText,
+				content: t.renderAssistant(e.Text.Text),
+			})
 			return true
 		}
 	case event.KindThinkingChunk:
@@ -78,11 +432,11 @@ func (t *transcript) foldEvent(e event.Event) bool {
 			return false
 		}
 		t.rawThinking += e.Thinking.Text
-		rendered := styles.Thinking.Render("· " + truncate(t.rawThinking, 800))
+		rendered := styles.Thinking.Render("· " + t.rawThinking)
 		if t.thinkingInflightIdx >= 0 && t.thinkingInflightIdx < len(t.blocks) {
-			t.blocks[t.thinkingInflightIdx] = rendered
+			t.blocks[t.thinkingInflightIdx].content = rendered
 		} else {
-			t.blocks = append(t.blocks, rendered)
+			t.blocks = append(t.blocks, transcriptBlock{kind: blockThinking, content: rendered})
 			t.thinkingInflightIdx = len(t.blocks) - 1
 		}
 		return true
@@ -91,50 +445,116 @@ func (t *transcript) foldEvent(e event.Event) bool {
 			return false
 		}
 		t.rawText += e.Text.Text
-		rendered := styles.Assistant.Render(t.rawText)
+		rendered := t.renderAssistant(t.rawText)
 		if t.textInflightIdx >= 0 && t.textInflightIdx < len(t.blocks) {
-			t.blocks[t.textInflightIdx] = rendered
+			t.blocks[t.textInflightIdx].content = rendered
 		} else {
-			t.blocks = append(t.blocks, rendered)
+			t.blocks = append(t.blocks, transcriptBlock{kind: blockText, content: rendered})
 			t.textInflightIdx = len(t.blocks) - 1
 		}
 		return true
 	case event.KindToolUseStart:
 		if e.ToolUseStart != nil {
-			label := fmt.Sprintf("→ %s %s", e.ToolUseStart.Name, compactInput(e.ToolUseStart.Input))
-			t.blocks = append(t.blocks, styles.ToolCall.Render(label))
+			t.resetInflight()
+			label := fmt.Sprintf("⏺ %s(%s)", e.ToolUseStart.Name, compactInput(e.ToolUseStart.Input))
+			t.blocks = append(t.blocks, transcriptBlock{
+				kind:    blockTool,
+				content: styles.ToolCall.Render(label),
+				toolID:  e.ToolUseStart.ToolID,
+			})
+			if t.toolBlocks == nil {
+				t.toolBlocks = map[string]int{}
+			}
+			t.toolBlocks[e.ToolUseStart.ToolID] = len(t.blocks) - 1
 			return true
 		}
 	case event.KindToolUseResult:
 		if e.ToolUseResult != nil {
-			var b strings.Builder
-			if e.ToolUseResult.IsError {
-				b.WriteString(styles.ToolErr.Render("✗ " + truncate(e.ToolUseResult.Content, 800)))
-			} else {
-				b.WriteString(styles.ToolOK.Render("✓ " + truncate(e.ToolUseResult.Content, 800)))
-			}
-			if diff, ok := e.ToolUseResult.Metadata.(*fs.FileDiff); ok && diff != nil {
-				b.WriteByte('\n')
-				b.WriteString(renderFileDiff(diff))
-			}
-			t.blocks = append(t.blocks, b.String())
+			t.resetInflight()
+			return t.attachToolResult(e.ToolUseResult)
+		}
+	case event.KindCompacting:
+		if e.Compacting != nil {
+			t.resetInflight()
+			label := fmt.Sprintf("↻ compacting (%s)  context %.0f%%",
+				e.Compacting.Type, e.Compacting.UsageRatio*100)
+			t.blocks = append(t.blocks, transcriptBlock{
+				kind:    blockSystem,
+				content: styles.Compacting.Render(label),
+			})
 			return true
 		}
+	case event.KindDrainingInfo:
+		t.resetInflight()
+		t.blocks = append(t.blocks, transcriptBlock{
+			kind:    blockSystem,
+			content: styles.Draining.Render("↓ draining async subagent results"),
+		})
+		return true
 	case event.KindError:
 		if e.Error != nil {
-			t.blocks = append(t.blocks, styles.ErrorBanner.Render(fmt.Sprintf("[error:%s] %v", e.Error.Stage, e.Error.Err)))
+			t.resetInflight()
+			t.blocks = append(t.blocks, transcriptBlock{
+				kind:    blockError,
+				content: styles.ErrorBanner.Render(fmt.Sprintf("[error:%s] %v", e.Error.Stage, e.Error.Err)),
+			})
 			return true
 		}
 	case event.KindRunCancelled:
-		t.blocks = append(t.blocks, styles.DimText.Render("[cancelled]"))
+		t.resetInflight()
+		t.blocks = append(t.blocks, transcriptBlock{
+			kind:    blockSystem,
+			content: styles.DimText.Render("[cancelled]"),
+		})
 		return true
 	case event.KindIterLimit:
 		if e.IterLimit != nil {
-			t.blocks = append(t.blocks, styles.DimText.Render(fmt.Sprintf("[iter-limit] reached %d iterations — press Enter to continue", e.IterLimit.Reached)))
+			t.resetInflight()
+			t.blocks = append(t.blocks, transcriptBlock{
+				kind: blockSystem,
+				content: styles.Compacting.Render(
+					fmt.Sprintf("[iter-limit reached %d — press Enter to continue]", e.IterLimit.Reached)),
+			})
 			return true
 		}
 	}
 	return false
+}
+
+// attachToolResult folds the result line into the matching tool block.
+// Falls back to appending a standalone block when the ToolID is unknown
+// (defensive — the agent should always emit a start before the result).
+//
+// Visual contract:
+//   - status glyph (`✓` green / `✗` red) signals outcome
+//   - body content rendered in a neutral cyan so a successful read_file
+//     result doesn't read as a green "diff add" — the green vocabulary
+//     is reserved for actual diff additions
+//   - FileDiff metadata (write_file / edit_file) renders below the
+//     status line with its own +/− colored hunks
+func (t *transcript) attachToolResult(r *event.ToolUseResultPayload) bool {
+	body := strings.TrimRight(r.Content, "\n")
+	var resultLine string
+	if r.IsError {
+		resultLine = styles.ToolErr.Render("  ✗ ") + styles.ToolErr.Render(body)
+	} else {
+		resultLine = styles.ToolOK.Render("  ✓ ") + styles.ToolResult.Render(body)
+	}
+	if diff, ok := r.Metadata.(*fs.FileDiff); ok && diff != nil {
+		resultLine += "\n" + renderFileDiff(diff)
+	}
+
+	idx, ok := t.toolBlocks[r.ToolID]
+	if !ok || idx < 0 || idx >= len(t.blocks) {
+		t.blocks = append(t.blocks, transcriptBlock{
+			kind:    blockTool,
+			content: resultLine,
+			toolID:  r.ToolID,
+		})
+		return true
+	}
+	t.blocks[idx].content += "\n" + resultLine
+	return true
 }
 
 func compactInput(raw json.RawMessage) string {

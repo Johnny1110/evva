@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 
 	"github.com/johnny1110/evva/internal/agent/event"
@@ -191,30 +190,41 @@ func (t *transcript) applyToolGutter(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// wrapForWidth word-wraps s to w columns and falls back to a forced
-// character wrap for any line whose content still exceeds w after the
-// word-wrap pass (a single token longer than the column, like a long
-// URL or a wide code identifier). Both passes are ANSI-aware so styled
-// segments survive intact.
+// wrapForWidth wraps s to w columns while preserving every printable
+// rune — including leading whitespace on lines that resulted from a
+// forced break. Critical for pasted code: dropping the first-column
+// indent on wrapped continuations reads to the user as "my prompt got
+// cut", which was the bug that prompted this implementation.
+//
+// We deliberately do NOT pre-pass through wordwrap: wordwrap resets
+// its space buffer on every internal newline, which silently strips
+// leading indentation when a single line is wider than the column
+// (long URL, minified JSON, etc.). wrap.String alone — with
+// PreserveSpace enabled — keeps all bytes while honoring existing \n
+// breaks. The cost is the occasional mid-word break on a long
+// unbroken token; we accept it because losing content is worse than
+// breaking a URL across two lines.
 func wrapForWidth(s string, w int) string {
 	if w < 5 {
 		return s
 	}
-	wrapped := wordwrap.String(s, w)
-	return wrap.String(wrapped, w)
+	ww := wrap.NewWriter(w)
+	ww.PreserveSpace = true
+	_, _ = ww.Write([]byte(s))
+	return ww.String()
 }
 
-// renderUserPrompt draws a separator-and-bullet header so the prompt
-// reads as a hard break between conversation rounds, then the prompt
-// body wrapped to the transcript column so long pasted lines don't
-// get horizontally clipped by the viewport.
+// renderUserPrompt draws a HUD separator + bullet so the prompt reads
+// as a hard break between conversation rounds — a thick double-line
+// "scanline" across the column with a diamond on the left, then the
+// prompt body wrapped to the transcript column.
 func (t *transcript) renderUserPrompt(body string) string {
 	width := t.width
 	if width < 20 {
 		width = 20
 	}
-	sep := strings.Repeat("─", width-2)
-	return styles.Timeline.Render("●─"+sep) + "\n" + wrapForWidth(body, width)
+	sep := strings.Repeat("═", width-2)
+	return styles.TimelineCut.Render("◆═"+sep) + "\n" + wrapForWidth(body, width)
 }
 
 // setWidth installs (or re-installs) the markdown renderer for the
@@ -280,10 +290,20 @@ func (t *transcript) reflowBanner() {
 	t.blocks[t.bannerIdx] = block
 }
 
-// renderBannerContent builds the styled banner block from t.banner:
-// rounded border around the art + greeting + info rows, then centered
-// horizontally inside the transcript column. Returns "" when the spec
-// is empty so callers can detect "no banner to show".
+// renderBannerContent builds the styled banner block from t.banner.
+// Layout inside the double-magenta border:
+//
+//   [ ASCII art ]
+//   ──── ◆ ────       ← scanline separator
+//   greeting
+//   ──── ◆ ────
+//   ▸ AGENT    …      ← HUD info rows
+//   ▸ MODEL    …
+//   ▸ STARTED  …
+//
+// Whole block is centered horizontally inside the transcript column.
+// Returns "" when the spec is empty so callers can branch on "no
+// banner to show".
 func (t *transcript) renderBannerContent() string {
 	art := strings.TrimRight(t.banner.Art, "\n")
 	greeting := strings.TrimSpace(t.banner.Greeting)
@@ -293,19 +313,31 @@ func (t *transcript) renderBannerContent() string {
 		return ""
 	}
 
+	// Pick a separator length proportional to the widest section so
+	// the scanline reads as "in-line with everything else" instead
+	// of floating.
+	sepLen := bannerSepWidth(art, greeting, rows)
+	separator := styles.Timeline.Render(strings.Repeat("─", sepLen/2)) +
+		styles.TimelineCut.Render(" ◆ ") +
+		styles.Timeline.Render(strings.Repeat("─", sepLen-sepLen/2-3))
+
 	var inner strings.Builder
 	if art != "" {
 		inner.WriteString(styles.Banner.Render(art))
 	}
 	if greeting != "" {
 		if inner.Len() > 0 {
-			inner.WriteString("\n\n")
+			inner.WriteString("\n")
+			inner.WriteString(separator)
+			inner.WriteString("\n")
 		}
 		inner.WriteString(styles.Greeting.Render(greeting))
 	}
 	if len(rows) > 0 {
 		if inner.Len() > 0 {
-			inner.WriteString("\n\n")
+			inner.WriteString("\n")
+			inner.WriteString(separator)
+			inner.WriteString("\n")
 		}
 		inner.WriteString(renderBannerInfo(rows))
 	}
@@ -317,10 +349,48 @@ func (t *transcript) renderBannerContent() string {
 	return lipgloss.PlaceHorizontal(t.width, lipgloss.Center, box)
 }
 
+// bannerSepWidth returns the column count to use for the in-banner
+// scanline separator. Picks the widest section's width so the line
+// spans roughly the same as the content above/below it. Clamped to a
+// sane window so very tall ASCII art doesn't blow out the box.
+func bannerSepWidth(art, greeting string, rows []bannerInfoRow) int {
+	max := 0
+	for _, line := range strings.Split(art, "\n") {
+		if n := lipglossWidth(line); n > max {
+			max = n
+		}
+	}
+	if n := lipglossWidth(greeting); n > max {
+		max = n
+	}
+	for _, r := range rows {
+		// approximate: arrow + label + 2 + value
+		n := 2 + len(r.Label) + 2 + len(r.Value)
+		if n > max {
+			max = n
+		}
+	}
+	switch {
+	case max < 24:
+		return 24
+	case max > 80:
+		return 80
+	default:
+		return max
+	}
+}
+
+// lipglossWidth is a thin alias for lipgloss.Width — wraps the import
+// site so callers don't need to pull lipgloss themselves for one
+// measurement.
+func lipglossWidth(s string) int {
+	return lipgloss.Width(s)
+}
+
 // renderBannerInfo lays out the labeled metadata rows beneath the
-// greeting. Labels are right-padded to the longest label width so the
-// values line up in a single column — easier to scan than a free-flow
-// "label: value" list.
+// greeting in HUD readout style: a hot-pink ▸ arrow, the upper-cased
+// label in muted cyan, a fixed-width column gap, then the value in
+// bright fog white. Reads like a system telemetry panel.
 func renderBannerInfo(rows []bannerInfoRow) string {
 	maxLabel := 0
 	for _, r := range rows {
@@ -333,8 +403,9 @@ func renderBannerInfo(rows []bannerInfoRow) string {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		label := r.Label + strings.Repeat(" ", maxLabel-len(r.Label))
-		b.WriteString(styles.DimText.Render(label))
+		label := strings.ToUpper(r.Label) + strings.Repeat(" ", maxLabel-len(r.Label))
+		b.WriteString(styles.UserPrompt.Render("▸ "))
+		b.WriteString(styles.BannerInfo.Render(label))
 		b.WriteString("  ")
 		b.WriteString(styles.StatusValue.Render(r.Value))
 	}
@@ -360,7 +431,7 @@ func (t *transcript) appendUserPrompt(text string) {
 }
 
 // styleUserPromptLines applies UserPrompt styling line-by-line so the
-// `> ` head sits on row 0 and any lines that already carry ANSI codes
+// `▶ ` head sits on row 0 and any lines that already carry ANSI codes
 // (paste boundary chips, etc.) flow through without re-styling that
 // would clobber their colors.
 func styleUserPromptLines(text string) string {
@@ -368,13 +439,12 @@ func styleUserPromptLines(text string) string {
 	for i, line := range lines {
 		if strings.ContainsRune(line, 0x1b) {
 			if i == 0 {
-				lines[i] = styles.UserPrompt.Render("> ") + line
+				lines[i] = styles.UserPrompt.Render("▶ ") + line
 			}
-			// Already styled — leave intact.
 			continue
 		}
 		if i == 0 {
-			lines[i] = styles.UserPrompt.Render("> " + line)
+			lines[i] = styles.UserPrompt.Render("▶ " + line)
 		} else {
 			lines[i] = styles.UserPrompt.Render(line)
 		}
@@ -456,7 +526,7 @@ func (t *transcript) foldEvent(e event.Event) bool {
 	case event.KindToolUseStart:
 		if e.ToolUseStart != nil {
 			t.resetInflight()
-			label := fmt.Sprintf("⏺ %s(%s)", e.ToolUseStart.Name, compactInput(e.ToolUseStart.Input))
+			label := fmt.Sprintf("◢ %s(%s)", e.ToolUseStart.Name, compactInput(e.ToolUseStart.Input))
 			t.blocks = append(t.blocks, transcriptBlock{
 				kind:    blockTool,
 				content: styles.ToolCall.Render(label),
@@ -476,8 +546,8 @@ func (t *transcript) foldEvent(e event.Event) bool {
 	case event.KindCompacting:
 		if e.Compacting != nil {
 			t.resetInflight()
-			label := fmt.Sprintf("↻ compacting (%s)  context %.0f%%",
-				e.Compacting.Type, e.Compacting.UsageRatio*100)
+			label := fmt.Sprintf("↻ COMPACTING [%s]  ctx %.0f%%",
+				strings.ToUpper(e.Compacting.Type), e.Compacting.UsageRatio*100)
 			t.blocks = append(t.blocks, transcriptBlock{
 				kind:    blockSystem,
 				content: styles.Compacting.Render(label),
@@ -488,7 +558,7 @@ func (t *transcript) foldEvent(e event.Event) bool {
 		t.resetInflight()
 		t.blocks = append(t.blocks, transcriptBlock{
 			kind:    blockSystem,
-			content: styles.Draining.Render("↓ draining async subagent results"),
+			content: styles.Draining.Render("◈ DRAINING async subagent results"),
 		})
 		return true
 	case event.KindError:
@@ -496,7 +566,7 @@ func (t *transcript) foldEvent(e event.Event) bool {
 			t.resetInflight()
 			t.blocks = append(t.blocks, transcriptBlock{
 				kind:    blockError,
-				content: styles.ErrorBanner.Render(fmt.Sprintf("[error:%s] %v", e.Error.Stage, e.Error.Err)),
+				content: styles.ErrorBanner.Render(fmt.Sprintf("✘ [%s] %v", strings.ToUpper(e.Error.Stage), e.Error.Err)),
 			})
 			return true
 		}
@@ -504,7 +574,7 @@ func (t *transcript) foldEvent(e event.Event) bool {
 		t.resetInflight()
 		t.blocks = append(t.blocks, transcriptBlock{
 			kind:    blockSystem,
-			content: styles.DimText.Render("[cancelled]"),
+			content: styles.DimText.Render("◇ CANCELLED"),
 		})
 		return true
 	case event.KindIterLimit:
@@ -513,7 +583,7 @@ func (t *transcript) foldEvent(e event.Event) bool {
 			t.blocks = append(t.blocks, transcriptBlock{
 				kind: blockSystem,
 				content: styles.Compacting.Render(
-					fmt.Sprintf("[iter-limit reached %d — press Enter to continue]", e.IterLimit.Reached)),
+					fmt.Sprintf("⏸ ITER-LIMIT %d — press Enter to continue", e.IterLimit.Reached)),
 			})
 			return true
 		}
@@ -536,9 +606,9 @@ func (t *transcript) attachToolResult(r *event.ToolUseResultPayload) bool {
 	body := strings.TrimRight(r.Content, "\n")
 	var resultLine string
 	if r.IsError {
-		resultLine = styles.ToolErr.Render("  ✗ ") + styles.ToolErr.Render(body)
+		resultLine = styles.ToolErr.Render("  ✘ ") + styles.ToolErr.Render(body)
 	} else {
-		resultLine = styles.ToolOK.Render("  ✓ ") + styles.ToolResult.Render(body)
+		resultLine = styles.ToolOK.Render("  ▸ ") + styles.ToolResult.Render(body)
 	}
 	if diff, ok := r.Metadata.(*fs.FileDiff); ok && diff != nil {
 		resultLine += "\n" + renderFileDiff(diff)

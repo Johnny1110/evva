@@ -6,15 +6,17 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/johnny1110/evva/internal/tools/meta"
 	"github.com/johnny1110/evva/internal/tools/task"
 	"github.com/johnny1110/evva/internal/toolset"
 )
 
-// subagentPanelMinWidth is the floor for the left subagent column.
-// Kept tight — most subagent names are short and the transcript
-// benefits from every column. Names longer than 8 characters expand
-// the panel dynamically via subagentPanelWidth.
-const subagentPanelMinWidth = 12
+// agentChipMaxName caps how many characters of a subagent name appear
+// inside a chip — anything longer is truncated with an ellipsis so a
+// single strip can fit several agents on one row. Names are usually
+// short (kebab-case identifiers), so 12 leaves room for "kebab-case"
+// or "code-reviewer".
+const agentChipMaxName = 12
 
 // renderTaskPanel returns the bottom task panel string, or "" when no
 // non-deleted tasks remain. Each row prefixes a status glyph in the
@@ -43,13 +45,26 @@ func renderTaskPanel(ts *toolset.ToolState, width int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(styles.PanelHeader.Render("Tasks"))
+	b.WriteString(renderPanelHeader("TASKS", width))
 	b.WriteByte('\n')
 	for _, t := range rows {
 		b.WriteString(renderTaskRow(t, width))
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderPanelHeader formats a neon HUD section header. Label is
+// uppercased and flanked by half-block "scanline" bars so panels feel
+// like instrument readouts. Width controls the trailing rail length.
+func renderPanelHeader(label string, width int) string {
+	left := styles.PanelHeader.Render("▰▰ " + label + " ")
+	tailLen := width - len(label) - 4
+	if tailLen < 0 {
+		tailLen = 0
+	}
+	tail := styles.Timeline.Render(strings.Repeat("▰", tailLen))
+	return left + tail
 }
 
 // renderTaskRow formats one task with its status glyph + subject.
@@ -108,7 +123,7 @@ func renderTasksCompleteSnapshot(ts *toolset.ToolState, width int) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(styles.TasksDone.Render("✓ Tasks complete"))
+	b.WriteString(styles.TasksDone.Render("✔ TASKS COMPLETE"))
 	for _, t := range store.List() {
 		if t.Status == task.StatusDeleted {
 			continue
@@ -119,19 +134,18 @@ func renderTasksCompleteSnapshot(ts *toolset.ToolState, width int) string {
 	return b.String()
 }
 
-// renderSubagentPanel returns the LEFT-column subagent panel string,
-// or "" when no subagents are tracked. Each row is one subagent: the
-// status glyph + name + an "a" superscript when async.
+// renderAgentStrip returns the horizontal HUD chip strip rendered just
+// above the input. Each subagent is one bracketed chip — animated
+// spinner / static glyph + truncated name + async tag — colored by
+// its lifecycle status. Chips are separated by a soft dim spacer.
 //
-// frame is the current spinner index; active "ing" statuses render the
-// matching braille-dot frame in their status color so the panel shows
-// motion as the agent works. Terminal statuses (idle, crushed, etc)
-// keep their static glyph from the shared symbols table.
+// Returns "" when no subagents are tracked so the caller can collapse
+// the row entirely (zero visual cost when idle).
 //
-// The panel is intentionally narrow so the transcript keeps the bulk
-// of the screen width. Rows that overflow the column get truncated;
-// the status glyph and short name take priority.
-func renderSubagentPanel(ts *toolset.ToolState, width, frame int) string {
+// width is the available column count; if the joined chips exceed it
+// they wrap to a fresh row instead of being truncated. Losing visibility
+// of a running agent is worse than spending an extra screen row.
+func renderAgentStrip(ts *toolset.ToolState, width, frame int) string {
 	if ts == nil || !ts.HasAgentGroupPanel() {
 		return ""
 	}
@@ -140,37 +154,87 @@ func renderSubagentPanel(ts *toolset.ToolState, width, frame int) string {
 		return ""
 	}
 
-	var b strings.Builder
-	b.WriteString(styles.PanelHeader.Render("Subagents"))
-	b.WriteByte('\n')
-	for _, r := range rows {
-		status := strings.ToLower(r.Status)
-		glyph := renderStatusGlyph(status, frame)
-		name := r.Name
-		if name == "" {
-			name = r.ID
+	spacer := styles.DimText.Render(" ")
+	var lines []string
+	var current strings.Builder
+	currentWidth := 0
+	for i, r := range rows {
+		chip := renderAgentChip(r, frame)
+		chipWidth := lipgloss.Width(chip)
+		// 1-col spacer between chips on the same row.
+		needWidth := chipWidth
+		if currentWidth > 0 {
+			needWidth += 1
 		}
-		async := ""
-		if r.Async {
-			async = styles.DimText.Render(" a")
+		if currentWidth > 0 && currentWidth+needWidth > width {
+			lines = append(lines, current.String())
+			current.Reset()
+			currentWidth = 0
 		}
-		maxName := width - 4
-		if r.Async {
-			maxName -= 2
+		if currentWidth > 0 {
+			current.WriteString(spacer)
+			currentWidth++
 		}
-		if maxName > 0 && len(name) > maxName {
-			name = truncate(name, maxName)
-		}
-		row := fmt.Sprintf(" %s %s%s", glyph, styles.PanelRow.Render(name), async)
-		b.WriteString(row)
-		b.WriteByte('\n')
+		current.WriteString(chip)
+		currentWidth += chipWidth
+		_ = i
 	}
-	return strings.TrimRight(b.String(), "\n")
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderAgentChip formats one subagent as a HUD chip: ‹glyph name›
+// with optional async marker. The chevrons + content all share the
+// agent's status color so the chip reads as one unit.
+func renderAgentChip(r meta.SubagentSnapshot, frame int) string {
+	status := strings.ToLower(r.Status)
+	glyph := renderStatusGlyph(status, frame)
+	name := r.Name
+	if name == "" {
+		name = r.ID
+	}
+	if len(name) > agentChipMaxName {
+		name = name[:agentChipMaxName-1] + "…"
+	}
+	c := chipColor(status)
+	chev := lipgloss.NewStyle().Foreground(c).Bold(true)
+	nameStyle := lipgloss.NewStyle().Foreground(c)
+	asyncTag := ""
+	if r.Async {
+		asyncTag = styles.DimText.Render("ᵃ")
+	}
+	return chev.Render("‹") + glyph + " " + nameStyle.Render(name) + asyncTag + chev.Render("›")
+}
+
+// chipColor maps a subagent's lifecycle status to its chip border
+// color. Mirrors the status pill vocabulary so agent state reads
+// consistently across the bottom of the UI.
+func chipColor(status string) lipgloss.Color {
+	switch status {
+	case "thinking", "texting":
+		return paletteLightBlue
+	case "executing":
+		return paletteBrown
+	case "draining", "saving":
+		return palettePurple
+	case "compacting", "max_iters":
+		return paletteYellow
+	case "ready_report", "idle":
+		return paletteGreen
+	case "crushed", "interrupted":
+		return paletteRed
+	case "init":
+		return paletteMuted
+	default:
+		return paletteCyan
+	}
 }
 
 // renderStatusGlyph picks the right symbol for a status string: the
 // spinner frame in the spinner color when the status is active, the
-// static palette glyph otherwise. Centralizing here keeps panel rows
+// static palette glyph otherwise. Centralizing here keeps chip rows
 // and the all-tasks-complete snapshot visually in sync.
 func renderStatusGlyph(status string, frame int) string {
 	if style, ok := spinnerGlyphFor(status); ok {
@@ -180,35 +244,6 @@ func renderStatusGlyph(status string, frame int) string {
 	return styled(g.Symbol, g.Color)
 }
 
-// subagentPanelWidth computes the column width the subagent panel
-// should occupy: the minimum, expanded if any name is too long to fit.
-// Returns 0 when the panel is collapsed (no rows) so the caller can
-// give the column's screen real estate back to the transcript.
-func subagentPanelWidth(ts *toolset.ToolState) int {
-	if ts == nil || !ts.HasAgentGroupPanel() {
-		return 0
-	}
-	rows := ts.AgentGroup().Snapshot()
-	if len(rows) == 0 {
-		return 0
-	}
-	width := subagentPanelMinWidth
-	for _, r := range rows {
-		name := r.Name
-		if name == "" {
-			name = r.ID
-		}
-		// 4 cols overhead: leading space, glyph, space, trailing slack
-		need := len(name) + 4
-		if r.Async {
-			need += 2
-		}
-		if need > width {
-			width = need
-		}
-	}
-	return width
-}
 
 // styled wraps text in a foreground color without spinning up a fresh
 // lipgloss.Style for every cell — keeps panel rendering cheap on

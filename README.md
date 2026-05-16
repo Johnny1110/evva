@@ -145,6 +145,8 @@ OLLAMA_URL=http://localhost:11434
 
 ### In progress / next up
 
+- fs tool abspath issue.
+
 - Systemprompt:
   - main
   - explore
@@ -152,7 +154,7 @@ OLLAMA_URL=http://localhost:11434
   - agent-specific
 
 - Tool implementations:
-  - `tasks` (spawn sub-agents)
+  - `tasks` multi-step tasks work.
   - `tool_search` (lazy-load deferred tool schemas)
   - `skill` (invoke user-defined skills)
 

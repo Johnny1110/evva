@@ -4,8 +4,10 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 
 	config "github.com/johnny1110/evva/configs"
@@ -17,16 +19,21 @@ func Names() []tools.ToolName {
 	return []tools.ToolName{tools.READ_FILE, tools.WRITE_FILE, tools.EDIT_FILE}
 }
 
-// resolvePath validates that pathStr is absolute and returns its cleaned
-// form. Matches Claude Code's contract — the LLM must supply absolute
-// paths; relative paths are rejected up front with a hint pointing at the
-// workdir, so a misconfigured agent never silently writes to /cwd by
-// mistake.
+// resolvePath normalizes a model-supplied file path into a cleaned
+// absolute path on disk. Three transforms in order:
 //
-// A leading `~` or `~/` is expanded to the invoking user's home
-// directory before the absolute-path check. Models commonly write
-// `~/tmp/...` and a strict rejection there is unhelpful when expansion
-// is unambiguous.
+//  1. A leading `~` / `~/` expands to the invoking user's home dir
+//     (see resolveUserHome — robust against sudo / container envs
+//     where `$HOME=/root`).
+//  2. Relative paths are joined onto the configured workdir so the
+//     model never has to plumb `cfg.WorkDir` itself; "make a file
+//     at notes/todo.md" Just Works.
+//  3. The result is filepath.Cleaned to collapse `..`, double
+//     slashes, and `.` segments.
+//
+// Returns an error only when the input is empty or `~` expansion
+// fails outright — both signal a misconfigured agent or environment
+// rather than user intent.
 func resolvePath(pathStr string) (string, error) {
 	if pathStr == "" {
 		return "", fmt.Errorf("file_path is required")
@@ -37,24 +44,22 @@ func resolvePath(pathStr string) (string, error) {
 	}
 	if !filepath.IsAbs(expanded) {
 		cfg := config.Get()
-		return "", fmt.Errorf("file_path must be absolute (relative paths are not supported; workdir is %s)", cfg.WorkDir)
+		expanded = filepath.Join(cfg.WorkDir, expanded)
 	}
 	return filepath.Clean(expanded), nil
 }
 
-// expandHome resolves a leading `~` or `~/` against the current user's
-// home directory. Any other tilde (e.g. `~bob/foo`) is left untouched —
-// per-user lookup is out of scope for now.
+// expandHome resolves a leading `~` or `~/` against the invoking
+// user's home directory. Any other tilde (e.g. `~bob/foo`) is left
+// untouched — per-user lookup is out of scope for now.
 func expandHome(p string) (string, error) {
 	if p == "" || p[0] != '~' {
 		return p, nil
 	}
 	if len(p) > 1 && p[1] != '/' && p[1] != filepath.Separator {
-		// `~bob/...` style — unsupported; pass through so the
-		// absolute-path check reports a clear error.
 		return p, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := resolveUserHome()
 	if err != nil {
 		return "", fmt.Errorf("expand ~: %w", err)
 	}
@@ -62,6 +67,35 @@ func expandHome(p string) (string, error) {
 		return home, nil
 	}
 	return filepath.Join(home, p[2:]), nil
+}
+
+// resolveUserHome returns the directory the invoking user expects `~`
+// to mean. Resolution order matters — the first source that yields a
+// non-empty value wins:
+//
+//  1. $SUDO_USER's HomeDir — when running under sudo, the user almost
+//     always wants `~` to mean their *original* home, not `/root`.
+//     This was the reported bug: `~/tmp` silently became `/root/tmp`
+//     because $HOME inherited from the sudo session points at root.
+//  2. $HOME — the conventional source. Reliable in normal shells.
+//  3. user.Current().HomeDir — last-ditch lookup against /etc/passwd
+//     for environments where $HOME got unset entirely.
+//
+// The chain returns an error only when every source fails, which
+// shouldn't happen on any well-formed system.
+func resolveUserHome() (string, error) {
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if u, err := user.Lookup(sudoUser); err == nil && u.HomeDir != "" {
+			return u.HomeDir, nil
+		}
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return home, nil
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir, nil
+	}
+	return "", errors.New("could not determine user home directory")
 }
 
 func fileExists(path string) bool {

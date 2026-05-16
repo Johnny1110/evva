@@ -1,26 +1,29 @@
 // Package bubbletea is the reference TUI implementation of internal/ui.UI.
 //
-// Layout (top → bottom, then left → right within the body):
+// Layout (top → bottom; all rows except the viewport collapse to zero
+// height when their backing store is empty):
 //
-//	┌───────────────────────────────────────────────────────┬──────┐
-//	│ banner box (rounded border, greeting inside)          │ Sub  │
-//	│                                                       │agents│
-//	│ transcript (timeline gutter on the left, user prompts │      │
-//	│ cut the line; tool blocks branch with ├─ and pair     │ ⠋ a1 │
-//	│ each tool_use with its result inline; long lines wrap │ ⠹ a2 │
-//	│ to the column so nothing horizontally clips)          │      │
-//	├───────────────────────────────────────────────────────┤      │
-//	│ tasks panel (when not empty)                          │      │
-//	│   ◐ design schema   ☑ wire migration   ☐ run tests    │      │
-//	├───────────────────────────────────────────────────────┤      │
-//	│ > input                                               │      │
-//	├───────────────────────────────────────────────────────┴──────┤
-//	│ ⠋ run · evva · ▸ model · in X out Y · Context [████  ] 39% │  ← status bar (bottom, state pill first)
+//	┌──────────────────────────────────────────────────────────────┐
+//	│ banner box / transcript                                      │
+//	│                                                              │
+//	│  ▶ user prompt                                               │
+//	│  assistant text…                                             │
+//	│                                                              │
+//	├──────────────────────────────────────────────────────────────┤
+//	│ ▰▰ TASKS ▰▰▰▰▰▰▰▰▰▰▰▰▰…              (when non-empty)        │
+//	│   ▶ wire migration                                           │
+//	├──────────────────────────────────────────────────────────────┤
+//	│  ‹⠹ explorer› ‹▶ writer› ‹✔ reviewer›  (when non-empty)      │  ← agents chip strip
+//	├──────────────────────────────────────────────────────────────┤
+//	│ > input                                                      │
+//	├──────────────────────────────────────────────────────────────┤
+//	│ ‹⠋ RUN› ◆ evva ◆ ▸ model ◆ in X out Y ◆ CTX ▰▰▱…▱ 12%       │  ← status bar
 //	└──────────────────────────────────────────────────────────────┘
 //
-// Both side panels collapse when their stores are empty. When the
-// subagent panel is hidden the transcript and the rows below it span
-// the full width.
+// Live-activity indicators (tasks, agents, status) cluster at the
+// bottom of the screen as a coherent dashboard. The agents row is a
+// horizontal chip strip — not a side column — so the transcript
+// always spans the full terminal width.
 //
 // State machine: idle → running (on Enter) → idle | iter-limit |
 // error. Esc cancels the in-flight run when running; idle Esc is a
@@ -59,7 +62,7 @@ import (
 // startup. Short, gestures at next action, sets the tone without being
 // chatty. Callers can override per-deployment by editing this file or
 // adding a future ~/.evva/greeting.txt override.
-const defaultGreeting = "Welcome aboard — tell me what to build, and I'll get to work."
+const defaultGreeting = "// neural link established — what shall we build, ʘᴥʘ?"
 
 // pastePlaceholderRe matches the compact stand-in inserted into the
 // textarea when the user pastes a multi-line or large block. The TUI
@@ -275,26 +278,24 @@ func (m *rootModel) handleResize(w, h int) {
 //
 // The vertical budget is:
 //
-//	height = status-header(1) + transcript(N) + task-panel(K) + input(I+2) + footer(1)
+//	height = transcript(N) + task-panel(K) + agent-strip(A) + input(I+2) + status(1)
 //
-// The horizontal budget reserves the subagent column on the left when
-// any subagents are tracked; the transcript and rows below it shrink
-// to fit the remainder.
+// Each "if non-empty" row collapses to zero when its store is empty,
+// returning that height to the transcript. No reserved horizontal
+// column — the agents chip strip is a horizontal row, not a vertical
+// panel.
 func (m *rootModel) layoutSizes() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	subWidth := m.subPanelWidth()
-	bodyWidth := m.width - subWidth
-	if bodyWidth < 20 {
-		bodyWidth = 20
-	}
+	bodyWidth := m.bodyWidth()
 
 	taskHeight := lineCount(m.taskPanel(bodyWidth))
+	stripHeight := lineCount(m.agentStrip(bodyWidth))
 	inputHeight := m.input.Height() + 2 // +2 for border
-	statusHeight := 1                   // bottom status bar (model · tokens · context · state)
+	statusHeight := 1                   // bottom status bar (state · model · tokens · ctx)
 
-	vpHeight := m.height - taskHeight - inputHeight - statusHeight
+	vpHeight := m.height - taskHeight - stripHeight - inputHeight - statusHeight
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
@@ -531,8 +532,8 @@ func (m *rootModel) expandPastesForView(text string) string {
 		}
 		s := m.pastedBuf[i]
 		i++
-		head := styles.PasteChip.Render(fmt.Sprintf("┌─ paste %d chars ─", len(s)))
-		tail := styles.PasteChip.Render("└─ end paste ─")
+		head := styles.PasteChip.Render(fmt.Sprintf("╔═ PASTE %d chars ═╗", len(s)))
+		tail := styles.PasteChip.Render("╚════════════════════╝")
 		return "\n" + head + "\n" + s + "\n" + tail + "\n"
 	})
 }
@@ -627,37 +628,33 @@ func (m *rootModel) handleRunDone(err error) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the full screen by composing the regions: status bar
-// pinned at the top (so it stays visible regardless of scrollback),
-// main body underneath (left content column + right subagent column).
-// Lipgloss horizontal-join keeps the columns aligned without manual
-// padding math.
+// View renders the full screen. Vertical order (top → bottom):
+//
+//	viewport / banner / transcript    (scrollable area)
+//	tasks panel                       (only when tasks tracked)
+//	agents chip strip                 (only when subagents tracked)
+//	input box                         (rounded border)
+//	status bar                        (HUD)
+//
+// All live-activity indicators (tasks, agents, status) cluster at the
+// bottom of the screen as a coherent dashboard. Each row collapses to
+// zero height when its underlying store is empty, so the layout stays
+// quiet during single-turn chats.
 func (m *rootModel) View() string {
 	if m.width == 0 {
 		return "initializing…"
 	}
 
-	bodyWidth := m.bodyWidth()
-	subWidth := m.subPanelWidth()
+	width := m.width
 
-	// Main column (LEFT): viewport + (optional) task panel + input.
-	mainSections := []string{m.viewport.View()}
-	if tp := m.taskPanel(bodyWidth); tp != "" {
-		mainSections = append(mainSections, tp)
+	sections := []string{m.viewport.View()}
+	if tp := m.taskPanel(width); tp != "" {
+		sections = append(sections, tp)
 	}
-	mainSections = append(mainSections, styles.InputBorder.Render(m.input.View()))
-	main := strings.Join(mainSections, "\n")
-
-	// Subagent column (RIGHT): panel pinned at the top, padded down
-	// to match the main column's height so the join is rectangular.
-	var body string
-	if subWidth > 0 {
-		sub := renderSubagentPanel(m.controller.ToolState(), subWidth, m.spinnerFrameIdx)
-		sub = padToHeight(sub, lineCount(main), subWidth)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, main, sub)
-	} else {
-		body = main
+	if strip := m.agentStrip(width); strip != "" {
+		sections = append(sections, strip)
 	}
+	sections = append(sections, styles.InputBorder.Render(m.input.View()))
 
 	status := renderStatusBar(statusBarInput{
 		Width:        m.width,
@@ -668,8 +665,20 @@ func (m *rootModel) View() string {
 		ContextUsed:  m.contextUsed(),
 		ContextLimit: contextLimitFor(m.modelName()),
 	})
+	sections = append(sections, status)
 
-	return strings.Join([]string{body, status}, "\n")
+	return strings.Join(sections, "\n")
+}
+
+// agentStrip returns the horizontal HUD chip strip for tracked
+// subagents, or "" when none are tracked. Width is the full terminal
+// column count — the strip wraps to additional rows if there are too
+// many agents to fit on one line.
+func (m *rootModel) agentStrip(width int) string {
+	if m.controller == nil {
+		return ""
+	}
+	return renderAgentStrip(m.controller.ToolState(), width, m.spinnerFrameIdx)
 }
 
 // refreshBannerMeta repopulates the welcome banner with the controller's
@@ -711,21 +720,15 @@ func (m *rootModel) contextUsed() int {
 	return m.usage.InputTokens + m.usage.OutputTokens
 }
 
-// bodyWidth is the column width available to the transcript / task
-// panel / input — i.e. total width minus the subagent column.
+// bodyWidth returns the column width usable by transcript / panels /
+// input. Now identical to the terminal width — there's no longer a
+// reserved side column, since the agents chip strip lives horizontally
+// below the transcript instead of in a column to its side.
 func (m *rootModel) bodyWidth() int {
-	w := m.width - m.subPanelWidth()
-	if w < 20 {
-		w = 20
+	if m.width < 20 {
+		return 20
 	}
-	return w
-}
-
-func (m *rootModel) subPanelWidth() int {
-	if m.controller == nil {
-		return 0
-	}
-	return subagentPanelWidth(m.controller.ToolState())
+	return m.width
 }
 
 func (m *rootModel) taskPanel(width int) string {
@@ -742,18 +745,6 @@ func (m *rootModel) modelName() string {
 		}
 	}
 	return "-"
-}
-
-// padToHeight ensures `s` occupies at least `lines` rows by appending
-// blank rows of the given width. Keeps the lipgloss horizontal join
-// rectangular when the left column is shorter than the right.
-func padToHeight(s string, lines, width int) string {
-	current := lineCount(s)
-	if current >= lines {
-		return s
-	}
-	pad := strings.Repeat(strings.Repeat(" ", width)+"\n", lines-current)
-	return s + "\n" + strings.TrimRight(pad, "\n")
 }
 
 func lineCount(s string) int {

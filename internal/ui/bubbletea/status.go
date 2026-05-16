@@ -68,26 +68,24 @@ func (s runState) isActive() bool {
 }
 
 // stateColor maps a runState onto the palette color used by the status
-// pill. Vocabulary:
-//   - green   → idle, work complete
-//   - blue    → reasoning ("thinking" reads as cool, contemplative)
-//   - cyan    → emitting content ("texting" — fluent output)
-//   - orange  → tool execution (matches the orange ToolCall style)
-//   - magenta → draining (subagent results coming in)
-//   - yellow  → housekeeping (compacting, iter-limit)
-//   - red     → fault
+// pill. Vocabulary in the neon palette:
+//   - acid green → idle, work complete
+//   - cyan glow  → reasoning (cool contemplation)
+//   - cyan       → emitting content / running (fluent output)
+//   - brown      → tool execution (matches the ToolCall style)
+//   - purple     → draining (subagent results syncing)
+//   - yellow     → housekeeping (compacting, iter-limit paused)
+//   - glitch red → fault
 func stateColor(s runState) lipgloss.Color {
 	switch s {
-	case stateRunning:
+	case stateRunning, stateTexting:
 		return paletteCyan
 	case stateThinking:
 		return paletteLightBlue
-	case stateTexting:
-		return paletteCyan
 	case stateExecuting:
-		return paletteOrange
+		return paletteBrown
 	case stateDraining:
-		return paletteMagenta
+		return palettePurple
 	case stateIterLimit, stateCompacting:
 		return paletteYellow
 	case stateError:
@@ -109,48 +107,58 @@ type statusBarInput struct {
 	ContextLimit int // model's context window from constant.MODEL_CONTEXT_SIZE
 }
 
-// renderStatusBar formats the bottom one-liner. The leading column is
-// the animated state pill — that is the highest-signal cell ("am I
-// running, paused, errored?") so it sits first where the eye lands.
+// renderStatusBar formats the bottom one-liner as a neon HUD: a
+// bracketed animated state pill on the left, the brand mark, model
+// id, cumulative tokens, and a context-utilization meter — each cell
+// separated by a hot-pink diamond.
 //
-// Layout: `⠋ running  ·  evva  ·  ▸ model  ·  in X  out Y  ·  Context [████░ ] 39%`.
+// Layout: `‹⠋ THINKING› ◆ evva ◆ ▸ model ◆ in X out Y ◆ CTX ▰▰▱▱…▱ 12%`.
 // Width pads the bar so it fills the terminal.
 func renderStatusBar(in statusBarInput) string {
+	sep := styles.StatusSep.Render(" ◆ ")
 	parts := []string{
 		renderStatePill(in.State, in.Frame),
-		styles.StatusValue.Render("evva"),
-		styles.StatusKey.Render(" " + in.Model),
+		styles.UserPrompt.Render("evva"),
+		styles.StatusKey.Render("▸ ") + styles.StatusValue.Render(in.Model),
 		styles.StatusKey.Render("in ") + styles.StatusValue.Render(humanTokens(in.Usage.InputTokens)) +
 			styles.StatusKey.Render("  out ") + styles.StatusValue.Render(humanTokens(in.Usage.OutputTokens)),
 		renderContextBar(in.ContextUsed, in.ContextLimit),
 	}
-	body := strings.Join(parts, "  ·  ")
+	body := strings.Join(parts, sep)
 	return styles.StatusBar.Width(in.Width).Render(body)
 }
 
-// renderStatePill formats the state label, swapping in a spinner frame
-// for the leading glyph whenever the agent is doing something active.
-// Idle / paused / error render a static glyph so the user can tell at
-// a glance whether work is in flight.
+// renderStatePill renders the leftmost HUD cell: animated braille
+// spinner + uppercase state label, wrapped in single-arrow brackets so
+// the cell reads like a sci-fi instrument readout. Brackets and label
+// share the state's neon color via the StatePill base style.
+//
+// Idle / paused / error use a static glyph so the user can distinguish
+// "live work" from terminal states at a glance.
 func renderStatePill(state runState, frame int) string {
-	style := lipgloss.NewStyle().Foreground(stateColor(state)).Bold(true)
+	c := stateColor(state)
+	style := styles.StatePill.Foreground(c)
 	var glyph string
 	switch {
 	case state.isActive():
 		glyph = spinnerFrame(frame)
 	case state == stateError:
-		glyph = "✗"
+		glyph = "✘"
 	case state == stateIterLimit:
 		glyph = "⏸"
 	default:
 		glyph = "●"
 	}
-	return style.Render(glyph + " " + state.String())
+	label := strings.ToUpper(state.String())
+	return style.Render("‹") + style.Render(glyph+" "+label) + style.Render("›")
 }
 
-// renderContextBar produces a fixed-width progress bar showing how full
-// the current prompt is relative to the model's context window. The bar
-// reads `Context [████░░░░░░] 39%`. used==0 collapses gracefully to 0%.
+// renderContextBar produces a HUD utilization meter showing how much
+// of the model's context window has been consumed. Rendered with
+// half-block tally marks (▰ filled, ▱ empty) and bracketed in cyan so
+// it reads as an instrument cell rather than a vague progress widget.
+//
+// Format: `CTX ▰▰▰▱▱▱▱▱▱▱▱▱ 12%`. used==0 collapses gracefully to 0%.
 func renderContextBar(used, limit int) string {
 	const barWidth = 12
 	pct := 0
@@ -164,10 +172,10 @@ func renderContextBar(used, limit int) string {
 	if filled > barWidth {
 		filled = barWidth
 	}
-	bar := styles.ContextFill.Render(strings.Repeat("█", filled)) +
-		styles.ContextRail.Render(strings.Repeat("░", barWidth-filled))
-	return styles.ContextBar.Render("Context ") +
-		styles.StatusKey.Render("[") + bar + styles.StatusKey.Render("] ") +
+	bar := styles.ContextFill.Render(strings.Repeat("▰", filled)) +
+		styles.ContextRail.Render(strings.Repeat("▱", barWidth-filled))
+	return styles.ContextBar.Render("CTX ") +
+		bar + " " +
 		styles.StatusValue.Render(fmt.Sprintf("%d%%", pct))
 }
 

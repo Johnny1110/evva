@@ -50,6 +50,12 @@ type transcriptBlock struct {
 	// to decide whether to fold and how many "more lines" the preview
 	// marker should report.
 	toolResultLines int
+	// noFold opts the block out of the length-triggered fold pass.
+	// Set on tool results that the user always wants to see in full
+	// — currently file write / edit (their FileDiff metadata is the
+	// load-bearing artifact of the call; folding it defeats the
+	// purpose of the call having happened).
+	noFold bool
 }
 
 // transcript accumulates the scrollback the user reads in the viewport.
@@ -643,8 +649,10 @@ func (t *transcript) attachToolResult(r *event.ToolUseResultPayload) bool {
 	} else {
 		resultBody = styles.ToolOK.Render("  ▸ ") + styles.ToolResult.Render(body)
 	}
+	hasDiff := false
 	if diff, ok := r.Metadata.(*fs.FileDiff); ok && diff != nil {
 		resultBody += "\n" + renderFileDiff(diff)
+		hasDiff = true
 	}
 
 	idx, ok := t.toolBlocks[r.ToolID]
@@ -657,11 +665,13 @@ func (t *transcript) attachToolResult(r *event.ToolUseResultPayload) bool {
 			toolID:          r.ToolID,
 			toolResult:      resultBody,
 			toolResultLines: lineCount(resultBody),
+			noFold:          hasDiff,
 		})
 		return true
 	}
 	t.blocks[idx].toolResult = resultBody
 	t.blocks[idx].toolResultLines = lineCount(resultBody)
+	t.blocks[idx].noFold = hasDiff
 	return true
 }
 
@@ -669,6 +679,9 @@ func (t *transcript) attachToolResult(r *event.ToolUseResultPayload) bool {
 // line (already in b.content) followed by the result body. The result
 // is shown in full when:
 //   - the transcript is in expand-all mode (Ctrl+O),
+//   - the block opted out of folding (file write/edit — the diff is
+//     the load-bearing output of the call; folding it defeats the
+//     purpose of the call having happened),
 //   - the result is short enough not to warrant folding, OR
 //   - the result is empty (still in flight)
 //
@@ -679,7 +692,7 @@ func (t *transcript) composeToolBlock(b transcriptBlock) string {
 	if b.toolResult == "" {
 		return b.content
 	}
-	if t.expandTools || b.toolResultLines <= foldToolThreshold {
+	if t.expandTools || b.noFold || b.toolResultLines <= foldToolThreshold {
 		if b.content == "" {
 			return b.toolResult
 		}

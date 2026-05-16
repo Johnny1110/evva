@@ -90,6 +90,40 @@ func TestToolResultFoldsLongBody(t *testing.T) {
 	}
 }
 
+// TestToolResultDiffNeverFolds locks down that file write/edit results
+// (which carry FileDiff metadata) always render in full, even when
+// long. The diff IS the artifact of the call; folding it is hostile.
+func TestToolResultDiffNeverFolds(t *testing.T) {
+	tr := transcript{
+		width:               80,
+		textInflightIdx:     -1,
+		thinkingInflightIdx: -1,
+		bannerIdx:           -1,
+	}
+	var lines []string
+	for i := 0; i < 50; i++ {
+		lines = append(lines, "+ added line "+string(rune('a'+i%26)))
+	}
+	body := strings.Join(lines, "\n")
+	tr.blocks = []transcriptBlock{{
+		kind:            blockTool,
+		content:         "◢ write_file({...})",
+		toolID:          "tool_w",
+		toolResult:      body,
+		toolResultLines: 50,
+		noFold:          true,
+	}}
+	out := tr.String()
+	if strings.Contains(out, "more lines") {
+		t.Fatalf("file write result must not fold:\n%s", out)
+	}
+	for _, line := range lines {
+		if !strings.Contains(out, line) {
+			t.Fatalf("noFold block missing line %q:\n%s", line, out)
+		}
+	}
+}
+
 // TestToolResultShortStaysInline keeps short results inline — folding
 // 3 lines wastes a row on the marker and obscures useful output.
 func TestToolResultShortStaysInline(t *testing.T) {

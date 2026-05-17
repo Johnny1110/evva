@@ -259,22 +259,28 @@ func TestCacheInvalidatesOnWidthChange(t *testing.T) {
 }
 
 // TestCacheInvalidatesOnBlockRev — appending a chunk to a streaming
-// TextBlock must produce a strictly-longer rendered output. This
-// guards against the "rev not bumped" bug.
+// block must produce a render that includes the appended content.
+// This guards against the "rev not bumped" bug. We use ThinkingBlock
+// (no glamour) so length is monotonic with input length — TextBlock's
+// glamour pass adds variable padding that can shorten the output even
+// as content grows.
 func TestCacheInvalidatesOnBlockRev(t *testing.T) {
 	tr := newTestTranscript(t, 80)
-	tb := newTextBlock("first ")
+	tb := newThinkingBlock("first")
 	tr.AppendBlock(tb)
 
-	short := tr.View()
-	tb.Append("second")
-	long := tr.View()
+	short := stripANSI(tr.View())
+	tb.Append(" second")
+	long := stripANSI(tr.View())
 
-	if len(long) <= len(short) {
-		t.Errorf("expected longer output after Append; short=%d long=%d", len(short), len(long))
+	if !strings.Contains(short, "first") {
+		t.Errorf("initial content missing:\n%s", short)
 	}
-	if !strings.Contains(long, "second") {
+	if !strings.Contains(long, "first second") {
 		t.Errorf("appended chunk not in render:\n%s", long)
+	}
+	if short == long {
+		t.Errorf("cache returned stale render after Append (rev not bumped?)")
 	}
 }
 
@@ -283,24 +289,27 @@ func TestCacheInvalidatesOnBlockRev(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // TestStreamingTextCoalesces — two KindTextChunk events with the
-// same in-flight scope produce ONE TextBlock, not two.
+// same in-flight scope produce ONE TextBlock, not two. The merged
+// text appears in the block's PlainText. (We don't assert on the
+// rendered View() because glamour styles individual tokens — the
+// concatenated "hello world" string can be split across ANSI
+// escape boundaries in the styled output.)
 func TestStreamingTextCoalesces(t *testing.T) {
 	tr := newTestTranscript(t, 80)
 	tr.IngestEvent(event.Event{Kind: event.KindTextChunk, Text: &event.TextPayload{Text: "hello "}})
 	tr.IngestEvent(event.Event{Kind: event.KindTextChunk, Text: &event.TextPayload{Text: "world"}})
 
-	textBlocks := 0
+	var textBlocks []*TextBlock
 	for _, b := range tr.Blocks() {
-		if b.Kind() == KindText {
-			textBlocks++
+		if tb, ok := b.(*TextBlock); ok {
+			textBlocks = append(textBlocks, tb)
 		}
 	}
-	if textBlocks != 1 {
-		t.Errorf("two text chunks should produce ONE block, got %d", textBlocks)
+	if len(textBlocks) != 1 {
+		t.Fatalf("two text chunks should produce ONE TextBlock, got %d", len(textBlocks))
 	}
-	out := tr.View()
-	if !strings.Contains(out, "hello world") {
-		t.Errorf("merged chunk content missing from render:\n%s", out)
+	if got := textBlocks[0].PlainText(); got != "hello world" {
+		t.Errorf("merged PlainText = %q, want %q", got, "hello world")
 	}
 }
 

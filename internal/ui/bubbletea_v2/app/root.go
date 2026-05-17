@@ -11,10 +11,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/johnny1110/evva/internal/agent/event"
 	"github.com/johnny1110/evva/internal/llm"
+	"github.com/johnny1110/evva/internal/tools/task"
 	"github.com/johnny1110/evva/internal/ui"
+	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/agents"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/input"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/status"
+	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/tasks"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/transcript"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/events"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/theme"
@@ -99,6 +103,7 @@ func (a *App) Attach(c ui.Controller) {
 	a.status.SetAgentID(c.AgentID())
 	a.status.SetContext(0, status.ContextLimitFor(c.Model()))
 	a.view.MarkDirty()
+	a.relayout()
 }
 
 func (a *App) refreshBanner() {
@@ -131,14 +136,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = m.Width, m.Height
-		// Reserve 5 rows for the input (3 textarea + 2 border) and
-		// 2 rows for the status bar (hint line + status line).
-		viewportH := m.Height - 7
-		if viewportH < 1 {
-			viewportH = 1
-		}
-		a.view.SetSize(m.Width, viewportH)
 		a.input.SetWidth(m.Width)
+		a.relayout()
 		return a, nil
 
 	case events.QuitMsg:
@@ -162,26 +161,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, status.SpinnerTickCmd()
 
 	case events.AgentEventMsg:
-		// State machine first — sub-phase transitions, sticky
-		// terminal states.
-		a.state.Apply(m.Event)
-		// Per-event side effects on the status bar.
-		if m.Event.Usage != nil {
-			a.status.SetUsage(m.Event.Usage.Cumulative)
-		}
-		if a.transcript.IngestEvent(m.Event) {
-			a.view.MarkDirty()
-		}
-		// Update context bar from session — fresh on every event
-		// is cheaper than nothing because the meter changes most
-		// often around tool returns / turn ends.
-		if a.controller != nil {
-			a.status.SetContext(
-				a.controller.Session().LastTurnInputTokens(),
-				status.ContextLimitFor(a.controller.Model()),
-			)
-		}
-		return a, nil
+		return a.handleAgentEvent(m.Event)
 
 	case events.RunDoneMsg:
 		return a.handleRunDone(m.Err)
@@ -193,6 +173,99 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleKey(m)
 	}
 	return a, nil
+}
+
+// handleAgentEvent fans one agent event through the state machine,
+// the status bar, the transcript, and (on task store updates) the
+// auto-fold "TASKS COMPLETE" snapshot path.
+//
+// The Clear that drives the auto-fold MUST run off-goroutine: each
+// task deletion emits one observable.Change, which routes through
+// the agent's Sink and lands as another tea.Msg. Calling Clear
+// inline from Update would deadlock bubbletea v1.3.x's unbuffered
+// msgs channel — the same bug v1 documented at its app.go:813-826.
+// We return the Clear as a tea.Cmd so the cascade flows through
+// the normal msg→Update path.
+func (a *App) handleAgentEvent(e event.Event) (tea.Model, tea.Cmd) {
+	a.state.Apply(e)
+
+	if e.Usage != nil {
+		a.status.SetUsage(e.Usage.Cumulative)
+	}
+	if a.transcript.IngestEvent(e) {
+		a.view.MarkDirty()
+	}
+	if a.controller != nil {
+		a.status.SetContext(
+			a.controller.Session().LastTurnInputTokens(),
+			status.ContextLimitFor(a.controller.Model()),
+		)
+	}
+
+	var cmd tea.Cmd
+	if e.Kind == event.KindStoreUpdate && e.StoreUpdate != nil &&
+		e.StoreUpdate.Domain == task.Domain && a.controller != nil {
+		if tasks.AllCompleted(a.controller.ToolState()) {
+			width := a.transcriptWidth()
+			snap := tasks.RenderCompleteSnapshot(a.controller.ToolState(), width, a.theme)
+			a.transcript.AppendSynthetic(snap)
+			a.view.MarkDirty()
+			ts := a.controller.ToolState()
+			cmd = func() tea.Msg {
+				ts.TaskStore().Clear()
+				return nil
+			}
+		}
+	}
+
+	// Panel content may have changed (tasks added/removed/completed,
+	// subagents spawned/finished). Re-derive the viewport height so
+	// new panels push the input/status up instead of off-screen.
+	if e.Kind == event.KindStoreUpdate {
+		a.relayout()
+	}
+	return a, cmd
+}
+
+// relayout recomputes the viewport height based on the current
+// panel content. Called whenever a panel might have grown or
+// shrunk: WindowSize, agent store updates. The transcript width
+// itself doesn't depend on panel state, so we only adjust the
+// vertical split.
+//
+// Layout vertical reservations:
+//   - 5 rows: input box (3 textarea + 2 border)
+//   - 2 rows: hint line + status bar
+//   - ≥0 rows: tasks panel (header + N task rows)
+//   - ≥0 rows: agents chip strip (one row per wrapped line)
+func (a *App) relayout() {
+	if a.width == 0 || a.height == 0 {
+		return
+	}
+	used := 5 + 2 // input + hint+status
+	if a.controller != nil {
+		if panel := tasks.Render(a.controller.ToolState(), a.transcriptWidth(), a.theme); panel != "" {
+			used += strings.Count(panel, "\n") + 1
+		}
+		if strip := agents.Render(a.controller.ToolState(), a.transcriptWidth(), a.theme, a.state.Frame()); strip != "" {
+			used += strings.Count(strip, "\n") + 1
+		}
+	}
+	viewportH := a.height - used
+	if viewportH < 1 {
+		viewportH = 1
+	}
+	a.view.SetSize(a.width, viewportH)
+}
+
+// transcriptWidth returns the column count panels and snapshots
+// should size to. Currently identical to terminal width; future
+// layout work may reserve gutter columns.
+func (a *App) transcriptWidth() int {
+	if a.width < 20 {
+		return 20
+	}
+	return a.width
 }
 
 // handleRunDone fans the goroutine's exit error into the state
@@ -350,9 +423,12 @@ func (a *App) startContinue() {
 	}()
 }
 
-// View composes the rendered output:
+// View composes the rendered output. Vertical order (top → bottom),
+// each layer collapses to zero height when its backing data is empty:
 //
 //	viewport / banner / transcript          (scrollable area)
+//	tasks panel                             (only when tasks tracked)
+//	agents chip strip                       (only when subagents tracked)
 //	input box                               (rounded border)
 //	hint                                    (one-liner)
 //	status bar                              (HUD)
@@ -362,11 +438,24 @@ func (a *App) View() string {
 	}
 	var b strings.Builder
 	b.WriteString(a.view.View())
+
+	width := a.transcriptWidth()
+	if a.controller != nil {
+		if panel := tasks.Render(a.controller.ToolState(), width, a.theme); panel != "" {
+			b.WriteByte('\n')
+			b.WriteString(panel)
+		}
+		if strip := agents.Render(a.controller.ToolState(), width, a.theme, a.state.Frame()); strip != "" {
+			b.WriteByte('\n')
+			b.WriteString(strip)
+		}
+	}
+
 	b.WriteByte('\n')
 	b.WriteString(a.input.View())
 	b.WriteByte('\n')
 	// Hint line above the status bar. M7 will route focus-stack
-	// providers through here; for M5 we pass nil and rely on
+	// providers through here; for now we pass nil and rely on
 	// state-override + state-default.
 	hint := status.ResolveHint(a.state, nil)
 	b.WriteString(a.theme.FooterHint.Render("  " + hint))

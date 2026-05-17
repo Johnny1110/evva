@@ -17,6 +17,8 @@ import (
 	"github.com/johnny1110/evva/internal/ui"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/agents"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/input"
+	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/overlays"
+	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/slash"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/status"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/tasks"
 	"github.com/johnny1110/evva/internal/ui/bubbletea_v2/components/transcript"
@@ -29,11 +31,15 @@ import (
 // on startup.
 const defaultGreeting = "// neural link established — what shall we build, ʘᴥʘ?"
 
-// App is the v2 root model. M5 adds the bottom HUD (status bar +
-// contextual hint), the run-state machine, and the spinner tick.
-// The "running" bool from M4 is gone — the State machine owns
-// lifecycle; the cancel func still lives here because it's the App
-// that drives the goroutine.
+// App is the v2 root model. M7 wires the focus stack (modal
+// overlays: /config /model /compact) and the slash suggestion
+// panel (non-modal, floats above the input when the user types
+// "/"). Key routing precedence is now:
+//
+//  1. top of focus stack (if it's modal) — exclusive consumer
+//  2. global keys (ctrl+c, esc, ctrl+o, scroll)
+//  3. slash panel (when visible) for Tab / Up / Down
+//  4. input textarea (history nav, paste, plain typing)
 type App struct {
 	evvaHome   string
 	program    *tea.Program
@@ -48,6 +54,15 @@ type App struct {
 	input      *input.Input
 	status     *status.StatusBar
 	state      *status.State
+
+	// focus is the modal overlay stack. Empty during normal
+	// composition; non-empty while /config /model /compact (or M8+
+	// yank / search / permission) is open.
+	focus *FocusStack
+	// slash is the autocomplete suggestion panel. Visible whenever
+	// the input starts with "/" and the user hasn't dismissed it
+	// for this typing session.
+	slash *slash.Panel
 
 	// runCancel is the cancel func for the in-flight Run, set in
 	// startRun and cleared in handleRunDone. Used by the Esc /
@@ -84,6 +99,8 @@ func New(evvaHome string) *App {
 		input:      in,
 		status:     bar,
 		state:      st,
+		focus:      NewFocusStack(),
+		slash:      slash.New(),
 		startedAt:  time.Now(),
 	}
 }
@@ -169,6 +186,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case input.SubmitMsg:
 		return a.handleSubmit(m)
 
+	case overlays.CompactDoneMsg:
+		if m.Err != nil {
+			a.state.SetHint("compact failed: " + m.Err.Error())
+		}
+		return a, nil
+
+	case overlays.ModelSwitchedMsg:
+		// Mirror the controller-side swap in the UI: clear the
+		// transcript (preserve banner), refresh the banner with
+		// the new model id, reset cumulative usage.
+		a.transcript.Reset()
+		a.refreshBanner()
+		a.status.SetModel(a.controller.Model())
+		a.status.SetUsage(llm.Usage{})
+		a.status.SetContext(0, status.ContextLimitFor(a.controller.Model()))
+		a.state.SetHint("switched to " + m.Provider.Name + " / " + string(m.Model) + " · history cleared")
+		a.view.MarkDirty()
+		a.relayout()
+		return a, nil
+
 	case tea.KeyMsg:
 		return a.handleKey(m)
 	}
@@ -251,6 +288,19 @@ func (a *App) relayout() {
 			used += strings.Count(strip, "\n") + 1
 		}
 	}
+	// Overlay (modal panel) and slash suggestion are mutually
+	// exclusive in the layout — overlay wins. Both can shift the
+	// input down by several rows, so they need to be deducted from
+	// the viewport budget.
+	if top := a.focus.Top(); top != nil {
+		if body := top.View(a.transcriptWidth(), a.theme); body != "" {
+			used += strings.Count(body, "\n") + 1
+		}
+	} else if a.slashVisible() {
+		if body := a.slash.View(a.input.Value(), a.controller, a.transcriptWidth(), a.theme); body != "" {
+			used += strings.Count(body, "\n") + 1
+		}
+	}
 	viewportH := a.height - used
 	if viewportH < 1 {
 		viewportH = 1
@@ -284,13 +334,40 @@ func (a *App) handleRunDone(err error) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// handleKey routes a key event. Order matters: special keys (quit,
-// scroll, expand, history) precede the input textarea so multi-line
-// composition with embedded special chars behaves consistently.
+// handleKey routes a key event. Precedence (each layer can return
+// early; lower layers only see what the higher layers ignored):
+//
+//  1. top of focus stack — exclusive when modal
+//  2. ctrl+c / esc — quit / cancel-run / dismiss-error / pop-overlay
+//  3. ctrl+o — toggle tool fold
+//  4. PgUp / PgDn / Home / End — viewport scroll
+//  5. slash panel — Tab completes, Up/Down move selection, Esc dismisses
+//  6. input textarea — everything else (history nav, paste, plain typing)
 func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Layer 1: modal overlay — exclusive consumer.
+	if top := a.focus.Top(); top != nil && top.Modal() {
+		// Ctrl+C while an overlay is open: pop the overlay AND
+		// quit (matches v1 — Ctrl+C is the universal panic
+		// button).
+		if m.String() == "ctrl+c" {
+			a.focus.Pop()
+			a.relayout()
+			if a.runCancel != nil {
+				a.runCancel()
+			}
+			return a, tea.Quit
+		}
+		close, cmd := top.Update(m)
+		if close {
+			a.focus.Pop()
+			a.relayout()
+		}
+		return a, cmd
+	}
+
+	// Layer 2: global keys.
 	switch m.String() {
 	case "ctrl+c":
-		// Running → cancel the run; idle → quit. Matches v1.
 		if a.runCancel != nil {
 			a.interrupted = true
 			a.runCancel()
@@ -299,8 +376,6 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 
 	case "esc":
-		// Running → cancel. Error → dismiss (matches the "Esc
-		// dismiss" hint). Otherwise quit.
 		if a.runCancel != nil {
 			a.interrupted = true
 			a.runCancel()
@@ -308,6 +383,12 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if a.state.Current() == status.StateError {
 			a.state.Dismiss()
+			return a, nil
+		}
+		// Slash panel visible? Dismiss it for this typing session
+		// instead of quitting.
+		if a.slashVisible() {
+			a.slash.Dismiss()
 			return a, nil
 		}
 		return a, tea.Quit
@@ -321,14 +402,48 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.view.Update(m)
 	}
 
+	// Layer 3: slash panel navigation. Only intercept the keys the
+	// panel actually consumes — everything else flows to the input.
+	if a.slashVisible() {
+		catalog := slash.Catalog(a.controller)
+		switch m.String() {
+		case "tab":
+			if name := a.slash.Complete(a.input.Value(), catalog); name != "" {
+				a.input.SetValue(name)
+			}
+			return a, nil
+		case "up":
+			if a.slash.MoveSel(a.input.Value(), catalog, -1) {
+				return a, nil
+			}
+			// No movement → fall through (input handles history).
+		case "down":
+			if a.slash.MoveSel(a.input.Value(), catalog, +1) {
+				return a, nil
+			}
+		}
+	}
+
+	// Layer 4: input textarea.
 	cmd := a.input.Update(m)
 	return a, cmd
 }
 
+// slashVisible is a thin convenience over slash.Panel.Visible that
+// pre-computes the catalog and overlay state.
+func (a *App) slashVisible() bool {
+	overlayOpen := a.focus.Len() > 0
+	return a.slash.Visible(a.input.Value(), overlayOpen, slash.Catalog(a.controller))
+}
+
 // handleSubmit dispatches a SubmitMsg from the Input.
 //
-//   - Slash commands: /exit /quit /clear handled inline; the rest
-//     wait for M7's overlay focus stack.
+//   - Slash commands:
+//   - /exit, /quit       → quit
+//   - /clear             → reset transcript
+//   - /config            → push Config overlay
+//   - /model             → push Model overlay
+//   - /compact           → push Compact overlay
 //   - Empty submit while iter-limit-paused: Continue without
 //     appending a new user message.
 //   - Empty submit otherwise: no-op.
@@ -339,12 +454,44 @@ func (a *App) handleSubmit(m input.SubmitMsg) (tea.Model, tea.Cmd) {
 	switch text {
 	case "/exit", "/quit", "exit":
 		a.input.Reset()
+		a.slash.Reset()
 		return a, tea.Quit
 	case "/clear":
 		a.transcript.Reset()
 		a.input.Reset()
+		a.slash.Reset()
 		a.state.SetHint("")
 		a.view.MarkDirty()
+		return a, nil
+	case "/config":
+		a.input.Reset()
+		a.slash.Reset()
+		if o := overlays.NewConfig(a.controller); o != nil {
+			a.focus.Push(o)
+			a.relayout()
+		} else {
+			a.state.SetHint("no controller attached")
+		}
+		return a, nil
+	case "/model":
+		a.input.Reset()
+		a.slash.Reset()
+		if o := overlays.NewModel(a.controller); o != nil {
+			a.focus.Push(o)
+			a.relayout()
+		} else {
+			a.state.SetHint("no controller attached")
+		}
+		return a, nil
+	case "/compact":
+		a.input.Reset()
+		a.slash.Reset()
+		if o := overlays.NewCompact(a.controller); o != nil {
+			a.focus.Push(o)
+			a.relayout()
+		} else {
+			a.state.SetHint("no controller attached")
+		}
 		return a, nil
 	}
 
@@ -429,6 +576,8 @@ func (a *App) startContinue() {
 //	viewport / banner / transcript          (scrollable area)
 //	tasks panel                             (only when tasks tracked)
 //	agents chip strip                       (only when subagents tracked)
+//	overlay panel                           (only when focus stack non-empty)
+//	slash suggestion                        (only when "/<x>" in input)
 //	input box                               (rounded border)
 //	hint                                    (one-liner)
 //	status bar                              (HUD)
@@ -451,15 +600,37 @@ func (a *App) View() string {
 		}
 	}
 
+	if top := a.focus.Top(); top != nil {
+		b.WriteByte('\n')
+		b.WriteString(top.View(width, a.theme))
+	} else if a.slashVisible() {
+		b.WriteByte('\n')
+		b.WriteString(a.slash.View(a.input.Value(), a.controller, width, a.theme))
+	}
+
 	b.WriteByte('\n')
 	b.WriteString(a.input.View())
 	b.WriteByte('\n')
-	// Hint line above the status bar. M7 will route focus-stack
-	// providers through here; for now we pass nil and rely on
-	// state-override + state-default.
-	hint := status.ResolveHint(a.state, nil)
+
+	// Hint line above the status bar. The focus stack's top
+	// HintProvider wins; otherwise the state-default applies.
+	var hintProvider status.HintProvider
+	if top := a.focus.Top(); top != nil {
+		hintProvider = hintAdapter{top.Hint()}
+	}
+	hint := status.ResolveHint(a.state, hintProvider)
 	b.WriteString(a.theme.FooterHint.Render("  " + hint))
 	b.WriteByte('\n')
 	b.WriteString(a.status.Compose(a.width, a.theme))
 	return b.String()
 }
+
+// hintAdapter wraps a static string in status.HintProvider so the
+// focus stack top can supply its Hint() to ResolveHint without
+// requiring app.Focusable itself to embed HintProvider. The static
+// string is captured fresh each frame from top.Hint(), so a
+// state-dependent overlay (e.g. /config swapping list-mode ↔
+// editor-mode) reflects accurately.
+type hintAdapter struct{ s string }
+
+func (h hintAdapter) Hint() string { return h.s }

@@ -68,8 +68,11 @@ func TestGrep_RejectsInvalidRegex(t *testing.T) {
 	tool := &GrepTool{}
 	res, _ := tool.Execute(context.Background(),
 		json.RawMessage(`{"pattern":"[unclosed"}`))
-	if !res.IsError || !strings.Contains(res.Content, "bad pattern") {
-		t.Errorf("expected 'bad pattern'; got %q", res.Content)
+	if !res.IsError {
+		t.Fatalf("expected error for invalid regex; got content=%q", res.Content)
+	}
+	if !strings.Contains(res.Content, "brackets") && !strings.Contains(res.Content, "Unmatched") {
+		t.Errorf("expected regex error; got %q", res.Content)
 	}
 }
 
@@ -250,5 +253,101 @@ func TestGrep_DecodeError(t *testing.T) {
 	res, _ := tool.Execute(context.Background(), json.RawMessage(`{nope`))
 	if !res.IsError || !strings.Contains(res.Content, "decode") {
 		t.Errorf("expected decode error; got %q", res.Content)
+	}
+}
+
+func TestGrep_ContextAfter(t *testing.T) {
+	root := writeGrepFixture(t)
+	tool := &GrepTool{}
+
+	res, _ := tool.Execute(context.Background(),
+		json.RawMessage(fmt.Sprintf(`{"pattern":"func Foo","path":%q,"context_after":1}`, root)))
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	// alpha.go has "func Foo()" at line 3; with context_after=1 we should
+	// also see line 4 ("func Bar()").
+	if !strings.Contains(res.Content, "alpha.go:3:func Foo()") {
+		t.Errorf("expected match line; got %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "alpha.go-4-func Bar()") {
+		t.Errorf("expected context line 4; got %q", res.Content)
+	}
+}
+
+func TestGrep_ContextBefore(t *testing.T) {
+	root := writeGrepFixture(t)
+	tool := &GrepTool{}
+
+	res, _ := tool.Execute(context.Background(),
+		json.RawMessage(fmt.Sprintf(`{"pattern":"func Foo","path":%q,"context_before":1}`, root)))
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	// alpha.go:3 is the match, line 2 should appear as before-context.
+	if !strings.Contains(res.Content, "alpha.go-2-") {
+		t.Errorf("expected context line 2; got %q", res.Content)
+	}
+}
+
+func TestGrep_ContextAround(t *testing.T) {
+	root := writeGrepFixture(t)
+	tool := &GrepTool{}
+
+	res, _ := tool.Execute(context.Background(),
+		json.RawMessage(fmt.Sprintf(`{"pattern":"func Foo","path":%q,"context_around":1}`, root)))
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	// context_around=1 should act like -C1: both before and after context.
+	if !strings.Contains(res.Content, "alpha.go-2-") {
+		t.Errorf("expected before-context; got %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "alpha.go-4-func Bar()") {
+		t.Errorf("expected after-context; got %q", res.Content)
+	}
+}
+
+func TestGrep_ContextNoOverlap(t *testing.T) {
+	// Create a file with two matches separated by enough lines that
+	// context windows don't overlap.
+	root := t.TempDir()
+	content := "A\nB\nC\nD\nE\nmatch1\nG\nH\nI\nJ\nmatch2\nL\nM\nN\nO\n"
+	path := filepath.Join(root, "f.txt")
+	os.WriteFile(path, []byte(content), 0o644)
+
+	tool := &GrepTool{}
+	res, _ := tool.Execute(context.Background(),
+		json.RawMessage(fmt.Sprintf(`{"pattern":"match","path":%q,"context_after":1}`, root)))
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	// Two separate match groups with "--" between them.
+	if !strings.Contains(res.Content, "--") {
+		t.Errorf("expected '--' separator between disjoint context groups; got %q", res.Content)
+	}
+}
+
+func TestGrep_ContextDoesNotAffectCountMode(t *testing.T) {
+	root := writeGrepFixture(t)
+	tool := &GrepTool{}
+
+	res, _ := tool.Execute(context.Background(),
+		json.RawMessage(fmt.Sprintf(`{"pattern":"func ","path":%q,"output_mode":"count","context_around":2}`, root)))
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	// Count mode should still work normally, ignoring context flags.
+	if !strings.Contains(res.Content, "alpha.go:2") {
+		t.Errorf("expected count output; got %q", res.Content)
+	}
+	// No ":" in path:line:text format, just path:count.
+	if strings.Contains(res.Content, "func ") {
+		t.Errorf("count mode leaked match content: %s", res.Content)
 	}
 }

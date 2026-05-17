@@ -1,21 +1,18 @@
 package shell
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/johnny1110/evva/internal/tools"
 )
 
-// Grep is the singleton GrepTool. Stateless.
+// Grep is the singleton GrepTool. Delegates to system grep via Bash.
 var Grep tools.Tool = &GrepTool{}
 
 type GrepTool struct{}
@@ -29,7 +26,9 @@ func (t *GrepTool) Description() string {
 		"Output modes: \"content\" (default) lists matching lines, \"files_with_matches\" returns one path per match, " +
 		"\"count\" returns one count per file. " +
 		"Optional glob filter narrows by filename (e.g. \"*.go\"); head_limit caps total output rows. " +
-		"Skips binary-looking files and common vendored/build directories (.git, node_modules) automatically."
+		"context_around / context_before / context_after show N lines of surrounding context for each match (like grep -C/-B/-A). " +
+		"Skips common vendored/build directories (.git, node_modules) automatically. " +
+		"Delegates to the system grep command via bash."
 }
 
 func (t *GrepTool) Schema() json.RawMessage {
@@ -43,7 +42,10 @@ func (t *GrepTool) Schema() json.RawMessage {
 			"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"content","description":"What to return."},
 			"case_insensitive":{"type":"boolean","default":false,"description":"Make the match case-insensitive."},
 			"glob":{"type":"string","description":"Glob filter on filename (e.g. \"*.go\")."},
-			"head_limit":{"type":"integer","minimum":1,"description":"Cap the number of output rows."}
+			"head_limit":{"type":"integer","minimum":1,"description":"Cap the number of output rows."},
+			"context_around":{"type":"integer","minimum":0,"description":"Show N lines of context before and after each match (like grep -C N)."},
+			"context_before":{"type":"integer","minimum":0,"description":"Show N lines of context before each match (like grep -B N)."},
+			"context_after":{"type":"integer","minimum":0,"description":"Show N lines of context after each match (like grep -A N)."}
 		}
 	}`)
 }
@@ -55,6 +57,9 @@ type grepInput struct {
 	CaseInsensitive bool   `json:"case_insensitive"`
 	Glob            string `json:"glob"`
 	HeadLimit       int    `json:"head_limit"`
+	ContextAround   int    `json:"context_around"`
+	ContextBefore   int    `json:"context_before"`
+	ContextAfter    int    `json:"context_after"`
 }
 
 func (t *GrepTool) Execute(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -64,15 +69,6 @@ func (t *GrepTool) Execute(ctx context.Context, input json.RawMessage) (tools.Re
 	}
 	if in.Pattern == "" {
 		return tools.Result{IsError: true, Content: "grep: pattern is required"}, nil
-	}
-
-	pat := in.Pattern
-	if in.CaseInsensitive {
-		pat = "(?i)" + pat
-	}
-	re, err := regexp.Compile(pat)
-	if err != nil {
-		return tools.Result{IsError: true, Content: fmt.Sprintf("grep: bad pattern: %v", err)}, nil
 	}
 
 	root := in.Path
@@ -88,164 +84,110 @@ func (t *GrepTool) Execute(ctx context.Context, input json.RawMessage) (tools.Re
 		mode = "content"
 	}
 
-	files, err := collectGrepFiles(root, in.Glob)
+	cmd, err := buildGrepCmd(in.Pattern, root, mode, in.CaseInsensitive, in.Glob,
+		in.ContextBefore, in.ContextAfter, in.ContextAround, in.HeadLimit)
 	if err != nil {
 		return tools.Result{IsError: true, Content: fmt.Sprintf("grep: %v", err)}, nil
 	}
 
-	var (
-		lines   []string
-		matched = map[string]int{}
-		total   int
-	)
-	for _, f := range files {
-		if err := ctx.Err(); err != nil {
-			return tools.Result{IsError: true, Content: "grep: cancelled"}, err
-		}
-		hits, perFile, err := grepFile(f, re, mode)
-		if err != nil {
-			// Per-file errors (permission denied on one path) shouldn't stop
-			// the whole search — keep going.
-			continue
-		}
-		if perFile == 0 {
-			continue
-		}
-		matched[f] = perFile
-		total += perFile
-		lines = append(lines, hits...)
-		if in.HeadLimit > 0 && len(lines) >= in.HeadLimit {
-			lines = lines[:in.HeadLimit]
-			break
-		}
+	res, _ := Bash.Execute(ctx, json.RawMessage(
+		`{"command":`+strconv.Quote(cmd)+`,"description":"grep for pattern"}`,
+	))
+
+	// grep exit code 1 = no matches — treat as success with placeholder.
+	if res.IsError && strings.Contains(res.Content, "exit code 1") {
+		return tools.Result{Content: "(no matches)"}, nil
 	}
 
-	var body string
-	switch mode {
-	case "files_with_matches":
-		paths := make([]string, 0, len(matched))
-		for p := range matched {
-			paths = append(paths, p)
-		}
-		sort.Strings(paths)
-		body = strings.Join(paths, "\n")
-	case "count":
-		paths := make([]string, 0, len(matched))
-		for p := range matched {
-			paths = append(paths, p)
-		}
-		sort.Strings(paths)
-		var b strings.Builder
-		for _, p := range paths {
-			fmt.Fprintf(&b, "%s:%d\n", p, matched[p])
-		}
-		body = strings.TrimRight(b.String(), "\n")
-	default:
-		body = strings.Join(lines, "\n")
-	}
+	// Strip "Binary file X matches" lines from output.
+	cleaned := stripBinaryLines(res.Content)
 
-	if body == "" {
-		body = "(no matches)"
-	}
-	return tools.Result{Content: body}, nil
+	return tools.Result{Content: cleaned, IsError: res.IsError}, nil
 }
 
-// grepFile scans one file. Returns the matching lines (when mode is content)
-// and the per-file match count. Returns (nil, 0, nil) for files that look
-// binary so we don't spray non-text into the result.
-func grepFile(path string, re *regexp.Regexp, mode string) ([]string, int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer f.Close()
-
-	br := bufio.NewReader(f)
-	// Quick binary sniff: peek up to 512 bytes for a NUL byte.
-	if peek, _ := br.Peek(512); containsNUL(peek) {
-		return nil, 0, nil
-	}
-
-	var (
-		lines []string
-		count int
-		num   int
-	)
-	scanner := bufio.NewScanner(br)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		num++
-		line := scanner.Text()
-		if !re.MatchString(line) {
+// stripBinaryLines removes "Binary file X matches" lines that grep emits
+// when it encounters non-text files (not all systems support -I).
+func stripBinaryLines(s string) string {
+	lines := strings.Split(s, "\n")
+	out := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Binary file ") && strings.HasSuffix(line, " matches") {
 			continue
 		}
-		count++
-		if mode == "content" {
-			lines = append(lines, fmt.Sprintf("%s:%d:%s", path, num, line))
-		}
+		out = append(out, line)
 	}
-	return lines, count, nil
+	return strings.TrimRight(strings.Join(out, "\n"), "\n")
 }
 
-// collectGrepFiles returns the files to search starting from root. If root
-// is a file, returns just that file; otherwise walks and applies glob +
-// vendored-dir skip rules.
-func collectGrepFiles(root, glob string) ([]string, error) {
+// buildGrepCmd constructs a system grep command from the tool parameters.
+func buildGrepCmd(pattern, root, mode string, caseInsensitive bool, glob string,
+	ctxBefore, ctxAfter, ctxAround, headLimit int) (string, error) {
+
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, err
+		return "", fmt.Errorf("stat %s: %v", root, err)
 	}
-	if !info.IsDir() {
-		if glob != "" {
-			if ok, _ := filepath.Match(glob, filepath.Base(root)); !ok {
-				return nil, nil
-			}
-		}
-		return []string{root}, nil
+	isDir := info.IsDir()
+
+	var flags []string
+	flags = append(flags, "grep")
+
+	if caseInsensitive {
+		flags = append(flags, "-i")
 	}
 
-	var out []string
+	switch mode {
+	case "files_with_matches":
+		flags = append(flags, "-rl")
+	case "count":
+		flags = append(flags, "-rc")
+	default:
+		flags = append(flags, "-Hn")
+		if isDir {
+			flags = append(flags, "-r")
+		}
+	}
+
+	// Context flags.
+	ctxB := ctxBefore
+	ctxA := ctxAfter
+	if ctxAround > 0 {
+		ctxB = ctxAround
+		ctxA = ctxAround
+	}
+	if ctxB > 0 {
+		flags = append(flags, fmt.Sprintf("-B%d", ctxB))
+	}
+	if ctxA > 0 {
+		flags = append(flags, fmt.Sprintf("-A%d", ctxA))
+	}
+
+	// Exclude vendored directories.
 	skip := skipDirs()
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil // skip on error, keep walking
-		}
-		name := d.Name()
-		if d.IsDir() {
-			if _, ok := skip[name]; ok && p != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if glob != "" {
-			if ok, _ := filepath.Match(glob, name); !ok {
-				return nil
-			}
-		}
-		out = append(out, p)
-		return nil
-	})
-	return out, err
+	for dir := range skip {
+		flags = append(flags, fmt.Sprintf("--exclude-dir=%s", dir))
+	}
+
+	// Glob filter (--include only makes sense with -r on directories).
+	if glob != "" && isDir {
+		flags = append(flags, fmt.Sprintf("--include=%s", shellQuote(glob)))
+	}
+
+	flags = append(flags, "--")
+	flags = append(flags, shellQuote(pattern))
+	flags = append(flags, root)
+
+	cmd := strings.Join(flags, " ")
+
+	// Pipe through head when head_limit is set.
+	if headLimit > 0 {
+		cmd = fmt.Sprintf("%s | head -n %d", cmd, headLimit)
+	}
+
+	return cmd, nil
 }
 
-func skipDirs() map[string]struct{} {
-	return map[string]struct{}{
-		".git":         {},
-		"node_modules": {},
-		"vendor":       {},
-		".idea":        {},
-		".vscode":      {},
-		"dist":         {},
-		"build":        {},
-		"target":       {},
-	}
-}
-
-func containsNUL(b []byte) bool {
-	for _, c := range b {
-		if c == 0 {
-			return true
-		}
-	}
-	return false
+// shellQuote wraps s in single quotes, escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

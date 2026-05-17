@@ -12,3 +12,17 @@ import "github.com/johnny1110/evva/internal/tools"
 func Names() []tools.ToolName {
 	return []tools.ToolName{tools.BASH, tools.GREP, tools.TREE}
 }
+
+// skipDirs returns the set of directory names to skip during tree/grep walks.
+func skipDirs() map[string]struct{} {
+	return map[string]struct{}{
+		".git":         {},
+		"node_modules": {},
+		"vendor":       {},
+		".idea":        {},
+		".vscode":      {},
+		"dist":         {},
+		"build":        {},
+		"target":       {},
+	}
+}

@@ -115,4 +115,11 @@ type Controller interface {
 	// description; the agent decides if/when to invoke them via the
 	// SKILL tool. Returns nil when no skills are installed.
 	Skills() []Skill
+
+	// Compact forces an immediate compaction of the current session.
+	// kind is "micro" (elide older tool results, no LLM call) or
+	// "full" (one LLM call producing a summary brief). Returns
+	// ErrRunInProgress when a Run is currently driving the loop —
+	// the TUI surfaces that as a hint rather than retrying.
+	Compact(ctx context.Context, kind string) error
 }

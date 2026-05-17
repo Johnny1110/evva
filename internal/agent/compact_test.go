@@ -236,11 +236,16 @@ func TestFullCompactReplacesMessagesWithBrief(t *testing.T) {
 	if a.session.IsMicroCompacted() {
 		t.Error("IsMicroCompacted should reset to false after full compact")
 	}
-	if got, want := a.session.Usage.InputTokens, 100; got != want {
-		t.Errorf("session input tokens: got %d, want %d (summary cost folded in)", got, want)
+	// After full compact, cumulative Usage is reset to reflect the
+	// post-compact context: input = brief output tokens (the new
+	// prompt-payload size), output = 0 (no assistant turn yet). The
+	// summarizer's own cost is preserved in the structured log, not on
+	// the live struct — see compact.full's pre_compact_in / out fields.
+	if got, want := a.session.Usage.InputTokens, 50; got != want {
+		t.Errorf("session input tokens: got %d, want %d (post-compact = brief output tokens)", got, want)
 	}
-	if got, want := a.session.Usage.OutputTokens, 50; got != want {
-		t.Errorf("session output tokens: got %d, want %d (summary cost folded in)", got, want)
+	if got, want := a.session.Usage.OutputTokens, 0; got != want {
+		t.Errorf("session output tokens: got %d, want %d (fresh context after compact)", got, want)
 	}
 }
 
@@ -350,9 +355,14 @@ func TestCompactRatioUsesLastTurnInputTokens(t *testing.T) {
 
 // TestFullCompactResetsLastTurnInputTokens guards the second half of
 // the fix: after full-compact replaces Messages with a brief, the
-// last-turn marker must reset to 0 so the very next compact() call
-// (before the next thinking call repopulates it) doesn't spuriously
-// re-trigger.
+// session reshapes to reflect the post-compact context:
+//   - LastTurnInputTokens jumps to the brief size so the bar / threshold
+//     check immediately read the realistic new prompt size (no spurious
+//     re-fire on the next compact() call).
+//   - Cumulative Usage resets to {InputTokens: briefTokens, OutputTokens: 0}
+//     so the HUD reads as "fresh context after compact" — the user
+//     visually confirms the bar drop. Pre-compact totals are not preserved
+//     on the live struct (they go to the structured log instead).
 func TestFullCompactResetsLastTurnInputTokens(t *testing.T) {
 	stub := &stubLLM{
 		complete: func(ctx context.Context, msgs []llm.Message, toolSet []tools.Tool) (llm.Response, error) {
@@ -375,13 +385,15 @@ func TestFullCompactResetsLastTurnInputTokens(t *testing.T) {
 
 	a.fullCompact(context.Background(), a.session)
 
-	if got := a.session.LastTurnInputTokens(); got != 0 {
-		t.Errorf("after fullCompact: LastTurnInputTokens got %d, want 0 (must reset so next compact doesn't re-fire)", got)
+	const briefTokens = 800
+	if got := a.session.LastTurnInputTokens(); got != briefTokens {
+		t.Errorf("after fullCompact: LastTurnInputTokens got %d, want %d (post-compact estimate from brief size)", got, briefTokens)
 	}
-	// Cumulative should still include the summarizer's cost — accounting
-	// is preserved even though the "live prompt size" marker is cleared.
-	if got, want := a.session.Usage.InputTokens, 450_000+400_000; got != want {
-		t.Errorf("cumulative input tokens: got %d, want %d (summarizer cost folded in)", got, want)
+	if got := a.session.Usage.InputTokens; got != briefTokens {
+		t.Errorf("after fullCompact: cumulative input got %d, want %d (fresh context after compact)", got, briefTokens)
+	}
+	if got := a.session.Usage.OutputTokens; got != 0 {
+		t.Errorf("after fullCompact: cumulative output got %d, want 0 (fresh context after compact)", got)
 	}
 }
 

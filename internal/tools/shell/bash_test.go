@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/johnny1110/evva/internal/tools"
 )
 
 // Phase 1 analysis — BashTool.Execute code paths:
@@ -135,6 +137,48 @@ func TestBash_DecodeError(t *testing.T) {
 	res, _ := tool.Execute(context.Background(), json.RawMessage(`{not json`))
 	if !res.IsError || !strings.Contains(res.Content, "decode") {
 		t.Errorf("expected decode error; got isErr=%v content=%q", res.IsError, res.Content)
+	}
+}
+
+// TestBash_TimeoutKillsSubprocessTree exercises the bug fix: a shell
+// that backgrounds a sleep is still killed when the timeout fires.
+// Without the process-group SIGKILL + WaitDelay plumbing in Execute,
+// cmd.Run() blocks indefinitely because the orphan sleep inherits the
+// stdout pipe — the test would hang past its own deadline.
+//
+// We assert the call returns inside a small bound (250ms timeout +
+// 2s WaitDelay grace + 1s slack) and surfaces the "timed out" error.
+func TestBash_TimeoutKillsSubprocessTree(t *testing.T) {
+	tool := &BashTool{}
+	deadline := time.After(5 * time.Second)
+	done := make(chan struct {
+		res    tools.Result
+		err    error
+		ranFor time.Duration
+	}, 1)
+	go func() {
+		start := time.Now()
+		res, err := tool.Execute(context.Background(),
+			json.RawMessage(`{"command":"sleep 30 & echo backgrounded; sleep 30","timeout":250}`))
+		done <- struct {
+			res    tools.Result
+			err    error
+			ranFor time.Duration
+		}{res, err, time.Since(start)}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("unexpected go error: %v", got.err)
+		}
+		if !got.res.IsError || !strings.Contains(got.res.Content, "timed out") {
+			t.Errorf("expected timeout error; got %+v", got.res)
+		}
+		if got.ranFor > 4*time.Second {
+			t.Errorf("timeout teardown took %s — process group / WaitDelay not effective", got.ranFor)
+		}
+	case <-deadline:
+		t.Fatal("bash Execute hung past 5s — subprocess kept the pipe open")
 	}
 }
 

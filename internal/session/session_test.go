@@ -143,7 +143,7 @@ func TestMicroCompact_AcceptsEmptySlice(t *testing.T) {
 	}
 }
 
-func TestFullCompact_ResetsMicroFlagAndLastTurn(t *testing.T) {
+func TestFullCompact_ResetsMicroFlagAndSetsLastTurnToBrief(t *testing.T) {
 	s := New()
 	s.RecordTurn(llm.Usage{InputTokens: 1234})
 	s.MicroCompact([]llm.Message{{Role: llm.RoleUser, Content: "mid"}})
@@ -152,7 +152,7 @@ func TestFullCompact_ResetsMicroFlagAndLastTurn(t *testing.T) {
 	}
 
 	brief := []llm.Message{{Role: llm.RoleUser, Content: "[BRIEF]"}}
-	s.FullCompact(brief)
+	s.FullCompact(brief, 250)
 
 	if s.IsMicroCompacted() {
 		t.Error("FullCompact should reset microCompacted to false")
@@ -160,34 +160,39 @@ func TestFullCompact_ResetsMicroFlagAndLastTurn(t *testing.T) {
 	if got, want := s.GetFullCompactCount(), 1; got != want {
 		t.Errorf("GetFullCompactCount: got %d, want %d", got, want)
 	}
-	if got := s.LastTurnInputTokens(); got != 0 {
-		t.Errorf("LastTurnInputTokens after FullCompact: got %d, want 0 (must reset so next compact doesn't spuriously refire)", got)
+	// LastTurnInputTokens is set to the brief size so the next
+	// compact() call reads a realistic post-compact prompt and the
+	// TUI context bar settles at the brief % rather than 0.
+	if got := s.LastTurnInputTokens(); got != 250 {
+		t.Errorf("LastTurnInputTokens after FullCompact: got %d, want 250 (post-compact estimate from brief size)", got)
 	}
 	if got := s.GetMessages(); len(got) != 1 || got[0].Content != "[BRIEF]" {
 		t.Errorf("Messages after FullCompact: got %v", got)
 	}
 }
 
-func TestFullCompact_PreservesCumulativeUsage(t *testing.T) {
-	// Cumulative is the running tab of what the user paid; compaction
-	// resets prompt size but NOT cost accounting.
+func TestFullCompact_ResetsCumulativeUsageToBrief(t *testing.T) {
+	// FullCompact resets cumulative Usage to reflect the post-compact
+	// context so the HUD reads as "fresh start". Pre-compact totals are
+	// preserved in the structured log by the caller (compact.full
+	// pre_compact_in / pre_compact_out fields).
 	s := New()
 	s.AddUsage(llm.Usage{InputTokens: 999, OutputTokens: 111})
 
-	s.FullCompact([]llm.Message{{Role: llm.RoleUser, Content: "x"}})
+	s.FullCompact([]llm.Message{{Role: llm.RoleUser, Content: "x"}}, 42)
 
-	if got, want := s.Usage.InputTokens, 999; got != want {
-		t.Errorf("cumulative InputTokens after FullCompact: got %d, want %d", got, want)
+	if got, want := s.Usage.InputTokens, 42; got != want {
+		t.Errorf("cumulative InputTokens after FullCompact: got %d, want %d (brief size)", got, want)
 	}
-	if got, want := s.Usage.OutputTokens, 111; got != want {
-		t.Errorf("cumulative OutputTokens after FullCompact: got %d, want %d", got, want)
+	if got, want := s.Usage.OutputTokens, 0; got != want {
+		t.Errorf("cumulative OutputTokens after FullCompact: got %d, want %d (fresh context)", got, want)
 	}
 }
 
 func TestFullCompact_CountIncrementsAcrossCalls(t *testing.T) {
 	s := New()
 	for i := 0; i < 3; i++ {
-		s.FullCompact([]llm.Message{{Role: llm.RoleUser, Content: "x"}})
+		s.FullCompact([]llm.Message{{Role: llm.RoleUser, Content: "x"}}, 0)
 	}
 	if got, want := s.GetFullCompactCount(), 3; got != want {
 		t.Errorf("GetFullCompactCount: got %d, want %d", got, want)

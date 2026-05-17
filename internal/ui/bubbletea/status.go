@@ -21,13 +21,13 @@ import (
 type runState int
 
 const (
-	stateIdle runState = iota
-	stateRunning    // generic "agent loop is alive between sub-phases"
-	stateThinking   // model is generating reasoning tokens
-	stateTexting    // model is generating response content tokens
-	stateExecuting  // a tool call is in flight
-	stateDraining   // pulling async subagent results back
-	stateCompacting // micro/full session compaction running
+	stateIdle       runState = iota
+	stateRunning             // generic "agent loop is alive between sub-phases"
+	stateThinking            // model is generating reasoning tokens
+	stateTexting             // model is generating response content tokens
+	stateExecuting           // a tool call is in flight
+	stateDraining            // pulling async subagent results back
+	stateCompacting          // micro/full session compaction running
 	stateIterLimit
 	stateError
 )
@@ -103,29 +103,48 @@ type statusBarInput struct {
 	Usage        llm.Usage
 	State        runState
 	Frame        int
-	ContextUsed  int // tokens currently in the prompt (last turn's input)
-	ContextLimit int // model's context window from constant.MODEL_CONTEXT_SIZE
+	ContextUsed  int    // tokens currently in the prompt (last turn's input)
+	ContextLimit int    // model's context window from constant.MODEL_CONTEXT_SIZE
+	AgentID      string // root agent's id; rendered truncated to 8 chars
 }
 
 // renderStatusBar formats the bottom one-liner as a neon HUD: a
 // bracketed animated state pill on the left, the brand mark, model
-// id, cumulative tokens, and a context-utilization meter — each cell
-// separated by a hot-pink diamond.
+// id, cumulative tokens, a context-utilization meter, and the root
+// agent's id — each cell separated by a hot-pink diamond.
 //
-// Layout: `‹⠋ THINKING› ◆ evva ◆ ▸ model ◆ in X out Y ◆ CTX ▰▰▱▱…▱ 12%`.
-// Width pads the bar so it fills the terminal.
+// Layout: `‹⠋ THINKING› ◆ evva ◆ ▸ model ◆ in X out Y ◆ CTX ▰▰▱▱…▱ 12% ◆ id 1234abcd`.
+// Width pads the bar so it fills the terminal. AgentID is rendered
+// truncated to 8 chars; an empty id collapses the cell entirely.
 func renderStatusBar(in statusBarInput) string {
 	sep := styles.StatusSep.Render(" ◆ ")
 	parts := []string{
 		renderStatePill(in.State, in.Frame),
-		styles.UserPrompt.Render("evva"),
+		styles.UserPrompt.Render("EVVA"),
 		styles.StatusKey.Render("▸ ") + styles.StatusValue.Render(in.Model),
-		styles.StatusKey.Render("in ") + styles.StatusValue.Render(humanTokens(in.Usage.InputTokens)) +
-			styles.StatusKey.Render("  out ") + styles.StatusValue.Render(humanTokens(in.Usage.OutputTokens)),
+		styles.StatusKey.Render("IN ") + styles.StatusValue.Render(humanTokens(in.Usage.InputTokens)) +
+			styles.StatusKey.Render("  OUT ") + styles.StatusValue.Render(humanTokens(in.Usage.OutputTokens)),
 		renderContextBar(in.ContextUsed, in.ContextLimit),
+	}
+	if id := shortAgentID(in.AgentID); id != "" {
+		parts = append(parts, styles.StatusKey.Render("SID ")+styles.StatusValue.Render(id))
 	}
 	body := strings.Join(parts, sep)
 	return styles.StatusBar.Width(in.Width).Render(body)
+}
+
+// shortAgentID truncates the agent's uuid to its first 8 characters
+// for status-bar display — matches the banner row format and is
+// enough to tell two concurrent sessions apart in logs / screenshots.
+// Empty input collapses the cell.
+func shortAgentID(id string) string {
+	if id == "" {
+		return ""
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // renderStatePill renders the leftmost HUD cell: animated braille
@@ -150,7 +169,7 @@ func renderStatePill(state runState, frame int) string {
 		glyph = "●"
 	}
 	label := strings.ToUpper(state.String())
-	return style.Render("‹") + style.Render(glyph+" "+label) + style.Render("›")
+	return style.Render("") + style.Render(glyph+" "+label) + style.Render("")
 }
 
 // renderContextBar produces a HUD utilization meter showing how much

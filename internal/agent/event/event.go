@@ -52,7 +52,8 @@ const (
 	KindToolUseStart  Kind = "tool_use_start"
 	KindToolUseResult Kind = "tool_use_result"
 
-	KindCompacting Kind = "compacting"
+	KindCompacting    Kind = "compacting"
+	KindCompactingEnd Kind = "compacting_end" // pair to KindCompacting; TUI removes the inflight block
 
 	KindError Kind = "error"
 
@@ -90,6 +91,7 @@ type Event struct {
 	StoreUpdate   *StoreUpdatePayload   `json:",omitempty"`
 	Usage         *UsagePayload         `json:",omitempty"`
 	Compacting    *CompactingPayload    `json:",omitempty"`
+	CompactingEnd *CompactingEndPayload `json:",omitempty"`
 }
 
 // --- payload types ---
@@ -156,6 +158,18 @@ type ErrorPayload struct {
 type CompactingPayload struct {
 	Type       string
 	UsageRatio float64
+}
+
+// CompactingEndPayload reports the outcome of a compaction the TUI was
+// painting. OK=false marks the failure path so the transcript can swap
+// the spinner block for a short error line instead of just removing it.
+// BriefTokens carries the size of the full-compact brief so callers
+// that already painted a percent can update the figure on completion.
+type CompactingEndPayload struct {
+	Type        string
+	OK          bool
+	BriefTokens int
+	Err         string
 }
 
 // StoreUpdatePayload is the bridge between observable.Change and the event

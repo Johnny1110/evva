@@ -50,7 +50,7 @@ func TestEnvironment_FullySpecified(t *testing.T) {
 		"# Environment",
 		"OS / shell: darwin / zsh",
 		"Working directory: /home/user/code",
-		"Evva home (global config, skills, memory): /home/user/.evva",
+		"Evva home (global: config, skills, memory): /home/user/.evva",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q\nfull:\n%s", want, got)
@@ -63,7 +63,7 @@ func TestEnvironment_EmptyFieldsRenderPlaceholders(t *testing.T) {
 	for _, want := range []string{
 		"OS / shell: (unknown) / (unknown)",
 		"Working directory: (unknown)",
-		"Evva home (global config, skills, memory): (unset)",
+		"Evva home (global: config, skills, memory): (unset)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing placeholder %q\nfull:\n%s", want, got)

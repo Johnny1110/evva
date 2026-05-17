@@ -8,10 +8,19 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/johnny1110/evva/internal/tools"
 )
+
+// bashKillGrace is how long Wait waits for stdout/stderr pipes to
+// drain after the process exits. Needed because exec.CommandContext's
+// default kill only SIGKILLs the direct child; subprocesses (e.g.
+// `npm install` → node) inherit the pipe fds and can keep them open
+// even after we've torn down their parent. Without WaitDelay, Wait
+// blocks forever and the timeout never surfaces to the model.
+const bashKillGrace = 2 * time.Second
 
 // Default and maximum timeouts. The maximum mirrors the schema's documented
 // 600 000 ms cap; anything larger is clamped on input.
@@ -105,6 +114,30 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (tools.Re
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
+
+	// Put the shell in its own process group so the timeout-driven
+	// teardown can SIGKILL the whole tree, not just the immediate
+	// child. Without this, `bash -c "node server.js"` leaves node
+	// alive — it inherited stdout, so cmd.Wait blocks indefinitely
+	// waiting for the pipe to close, and the model never sees the
+	// "timed out" result.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Cancel hook: send SIGKILL to the entire process group when
+	// either the timeout fires or the caller cancels.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		// Negative pid → process group. Errors are best-effort: the
+		// group may already be gone, and we still want WaitDelay to
+		// catch any straggling pipe holders.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return nil
+	}
+	// Bound how long Wait can sit on file descriptors held by killed
+	// subprocesses. After this elapses (Go 1.20+), Wait closes the
+	// pipes itself and returns.
+	cmd.WaitDelay = bashKillGrace
 
 	err := cmd.Run()
 	out := buf.String()

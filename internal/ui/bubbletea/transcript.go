@@ -24,9 +24,10 @@ const (
 	blockText                   // assistant text / markdown
 	blockThinking               // dim reasoning text
 	blockTool                   // tool_use_start, possibly with result attached
-	blockSystem                 // compacting, draining, etc.
+	blockSystem                 // draining, error banners, generic system rows
 	blockError                  // KindError red banner
 	blockSynthetic              // pre-formatted block injected by the UI
+	blockCompacting             // animated inflight compact row; removed on KindCompactingEnd
 )
 
 // transcriptBlock is one logical entry in the scrollback. content is the
@@ -113,6 +114,20 @@ type transcript struct {
 	// every tool result renders in full. Toggled by Ctrl+O in the
 	// app.go key handler.
 	expandTools bool
+	// spinnerFrame is the rotating braille frame to render any
+	// inflight blockCompacting rows with. The rootModel sets it on
+	// every spinnerTickMsg via setSpinnerFrame and re-flows the
+	// viewport so the row visibly animates. -1 means "no compact in
+	// flight" — a fast `String()` skip.
+	spinnerFrame int
+	// compactingIdx is the index of the inflight blockCompacting row
+	// (the one being animated by spinnerFrame), or -1 when none. Used
+	// by foldEvent on KindCompactingEnd to remove the row.
+	compactingIdx int
+	// compactingType captures the kind the agent reported on
+	// KindCompacting (`micro` / `full`) so the inflight row label
+	// stays accurate while the spinner ticks.
+	compactingType string
 }
 
 // sanitizeForTranscript scrubs control bytes that would corrupt the
@@ -215,9 +230,39 @@ func (t *transcript) renderWithTimeline(b transcriptBlock) string {
 		return t.renderUserPrompt(b.content)
 	case blockTool:
 		return t.applyToolGutter(t.composeToolBlock(b))
+	case blockCompacting:
+		return t.applyLineGutter(t.renderCompactingInflight())
 	default:
 		return t.applyLineGutter(b.content)
 	}
+}
+
+// renderCompactingInflight produces the animated body for the inflight
+// compaction row. The spinner glyph rotates every spinnerTickMsg via
+// setSpinnerFrame; on each viewport refresh String() walks the blocks
+// and calls back here, picking up the latest frame.
+func (t *transcript) renderCompactingInflight() string {
+	frame := spinnerFrame(t.spinnerFrame)
+	kind := strings.ToUpper(t.compactingType)
+	if kind == "" {
+		kind = "?"
+	}
+	return styles.Compacting.Render(fmt.Sprintf("%s Compacting… [%s]", frame, kind))
+}
+
+// setSpinnerFrame updates the rotating-glyph index used by inflight
+// blockCompacting rows. The rootModel forwards spinnerTickMsg here and
+// refreshes the viewport when the transcript has an active compaction.
+func (t *transcript) setSpinnerFrame(idx int) {
+	t.spinnerFrame = idx
+}
+
+// HasInflightCompacting reports whether a blockCompacting row is
+// currently in the scrollback. Used by rootModel to decide whether to
+// re-render the viewport on each spinnerTickMsg — skipping the refresh
+// when nothing animates keeps idle CPU low.
+func (t *transcript) HasInflightCompacting() bool {
+	return t.compactingIdx >= 0
 }
 
 // gutterLine emits the blank-line spacer between two blocks. It picks
@@ -361,6 +406,7 @@ func (t *transcript) reset() {
 		textInflightIdx:     -1,
 		thinkingInflightIdx: -1,
 		bannerIdx:           -1,
+		compactingIdx:       -1,
 		width:               width,
 		expandTools:         expand,
 		md:                  md,
@@ -649,12 +695,45 @@ func (t *transcript) foldEvent(e event.Event) bool {
 	case event.KindCompacting:
 		if e.Compacting != nil {
 			t.resetInflight()
-			label := fmt.Sprintf("↻ COMPACTING [%s]  ctx %.0f%%",
-				strings.ToUpper(e.Compacting.Type), e.Compacting.UsageRatio*100)
+			// Re-use any existing inflight row instead of stacking
+			// multiple — the agent only ever runs one compaction at a
+			// time, so a second KindCompacting before KindCompactingEnd
+			// means the auto path picked up after the manual chooser
+			// fired, or vice versa.
+			if t.compactingIdx >= 0 && t.compactingIdx < len(t.blocks) {
+				t.compactingType = e.Compacting.Type
+				return true
+			}
+			t.compactingType = e.Compacting.Type
 			t.blocks = append(t.blocks, transcriptBlock{
-				kind:    blockSystem,
-				content: styles.Compacting.Render(label),
+				kind:    blockCompacting,
+				content: "", // re-rendered each frame from spinnerFrame
 			})
+			t.compactingIdx = len(t.blocks) - 1
+			return true
+		}
+	case event.KindCompactingEnd:
+		if e.CompactingEnd != nil {
+			if t.compactingIdx >= 0 && t.compactingIdx < len(t.blocks) {
+				if e.CompactingEnd.OK {
+					// Drop the animated row — the visible effect is the
+					// bar dropping in the HUD, no need for a corpse.
+					t.blocks = append(t.blocks[:t.compactingIdx], t.blocks[t.compactingIdx+1:]...)
+				} else {
+					// Swap to an error block so the user knows compact
+					// didn't actually run.
+					msg := strings.TrimSpace(e.CompactingEnd.Err)
+					if msg == "" {
+						msg = "compact failed"
+					}
+					t.blocks[t.compactingIdx] = transcriptBlock{
+						kind:    blockError,
+						content: styles.ErrorBanner.Render(fmt.Sprintf("✘ COMPACT [%s] %s", strings.ToUpper(e.CompactingEnd.Type), msg)),
+					}
+				}
+				t.compactingIdx = -1
+				t.compactingType = ""
+			}
 			return true
 		}
 	case event.KindDrainingInfo:

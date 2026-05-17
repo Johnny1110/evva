@@ -28,7 +28,7 @@ const slashMaxSuggestions = 5
 // while we ship it. /quit remains an alias the submit handler recognizes
 // but is omitted from the suggestion list to keep the row count tight.
 var defaultSlashCommands = []slashCommand{
-	{"/compact", "compact the transcript (coming soon)"},
+	{"/compact", "compact the transcript · pick micro or full"},
 	{"/config", "edit runtime settings (max_iterations, api keys, …)"},
 	{"/model", "switch llm provider / model · clears history"},
 	{"/clear", "clear the transcript"},
@@ -95,7 +95,7 @@ func (m *rootModel) availableSlashCommands() []slashCommand {
 // the panel with Esc for this typing session, or when there are no
 // matches.
 func (m *rootModel) slashVisible() bool {
-	if m.pendingApproval != nil || m.pendingConfig != nil || m.pendingModel != nil {
+	if m.pendingApproval != nil || m.pendingConfig != nil || m.pendingModel != nil || m.pendingCompact != nil {
 		return false
 	}
 	if m.slashDismissed {

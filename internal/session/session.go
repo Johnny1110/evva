@@ -76,16 +76,24 @@ func (s *Session) MicroCompact(messages []llm.Message) {
 	s.Messages = messages
 }
 
-// FullCompact replaces Messages with the summarization brief and resets
-// the in-flight compaction state. lastTurnInputTokens is cleared too —
-// the previous turn's input size described the pre-compaction prompt,
-// which no longer exists; the next thinking call will repopulate it
-// with the true post-compaction size.
-func (s *Session) FullCompact(messages []llm.Message) {
+// FullCompact replaces Messages with the summarization brief and
+// resets the in-flight compaction state. lastTurnInputTokens is set to
+// briefTokens — the brief is now the entirety of the prompt the next
+// turn will send, so callers (the TUI's context bar in particular) can
+// read accurate "current prompt size" without waiting for the next
+// thinking call to land.
+//
+// Cumulative Usage is also reset: in=briefTokens, out=0. The HUD reads
+// as "fresh context after compact" so the user can visually confirm
+// the bar drop (e.g. 80% → 40%) without the cumulative tail dragging
+// the numbers up. The compaction caller is responsible for logging
+// the pre-reset totals before invoking this — they're gone after.
+func (s *Session) FullCompact(messages []llm.Message, briefTokens int) {
 	s.microCompacted = false
 	s.fullCompactCount++
 	s.Messages = messages
-	s.lastTurnInputTokens = 0
+	s.lastTurnInputTokens = briefTokens
+	s.Usage = llm.Usage{InputTokens: briefTokens}
 }
 
 func (s *Session) GetFullCompactCount() int {

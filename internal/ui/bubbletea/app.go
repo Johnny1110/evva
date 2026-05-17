@@ -98,18 +98,16 @@ type UI struct {
 // config directory (typically ~/.evva); the constructor uses it to
 // resolve banner.txt with an embedded fallback.
 //
-// Mouse cell-motion is enabled so wheel-up / wheel-down scrolls the
-// transcript viewport. The cost: the terminal hands mouse events to the
-// program, so plain drag-select no longer flows through to the
-// terminal's native selection. Modern terminals (iTerm2, kitty,
-// Wezterm, Terminal.app) keep working — hold Shift (or Option/Alt on
-// macOS) while dragging to bypass the program and use native selection.
-// PgUp/PgDown/Home/End remain the keyboard scroll path.
+// Mouse capture is intentionally off. With cell-motion enabled the
+// terminal hands every wheel / drag event to the program, which broke
+// native copy-paste (the user had to hold Shift/Option while dragging
+// to bypass the program). Trading wheel-scroll for one-shot drag-select
+// is the right call — PgUp/PgDown/Home/End remain the keyboard scroll
+// path, and copy is something every TUI user reaches for constantly.
 func New(evvaHome string) *UI {
 	u := &UI{model: newRootModel(evvaHome)}
 	u.program = tea.NewProgram(u.model,
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	)
 	u.model.program = u.program
 	return u
@@ -270,6 +268,12 @@ type rootModel struct {
 	// pendingModel is non-nil while the /model picker is on screen.
 	pendingModel *pendingModel
 
+	// pendingCompact is non-nil while the /compact chooser is on
+	// screen. Same isolation pattern as pendingConfig / pendingModel:
+	// input is locked to the chooser's key handler until Enter or
+	// Esc.
+	pendingCompact *pendingCompact
+
 	// slashSel is the highlighted row in the slash-command suggestion
 	// panel. Reset to 0 whenever the match list changes; clamped each
 	// render so a shrinking list never indexes off the end.
@@ -344,7 +348,7 @@ func newRootModel(evvaHome string) *rootModel {
 	vp := viewport.New(80, 20)
 	vp.YPosition = 0
 
-	t := transcript{textInflightIdx: -1, thinkingInflightIdx: -1, bannerIdx: -1}
+	t := transcript{textInflightIdx: -1, thinkingInflightIdx: -1, bannerIdx: -1, compactingIdx: -1}
 	t.setBanner(bannerSpec{
 		Art:      banner.Load(evvaHome),
 		Greeting: defaultGreeting,
@@ -415,6 +419,14 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		m.spinnerFrameIdx++
+		// Animate any inflight blockCompacting row by pushing the new
+		// spinner frame into the transcript and re-flowing the viewport.
+		// Idle ticks (no compact running) skip the refresh so the CPU
+		// stays quiet between turns.
+		if m.transcript.HasInflightCompacting() {
+			m.transcript.setSpinnerFrame(m.spinnerFrameIdx)
+			m.refreshViewport()
+		}
 		return m, spinnerTickCmd()
 
 	case approvalRequestMsg:
@@ -437,6 +449,12 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalCancelMsg:
 		m.pendingApproval = nil
 		m.layoutSizes()
+		return m, nil
+
+	case compactDoneMsg:
+		if msg.err != nil {
+			m.hintText = "compact failed: " + truncate(msg.err.Error(), 120)
+		}
 		return m, nil
 
 	case quitMsg:
@@ -490,11 +508,12 @@ func (m *rootModel) layoutSizes() {
 	approvalHeight := lineCount(m.approvalPanel(bodyWidth))
 	configHeight := lineCount(m.configPanel(bodyWidth))
 	modelHeight := lineCount(m.modelPanel(bodyWidth))
+	compactHeight := lineCount(m.compactPanel(bodyWidth))
 	slashHeight := lineCount(m.slashPanel(bodyWidth))
 	inputHeight := m.input.Height() + 2 // +2 for border
 	statusHeight := 1                   // bottom status bar (state · model · tokens · ctx)
 
-	vpHeight := m.height - taskHeight - stripHeight - approvalHeight - configHeight - modelHeight - slashHeight - inputHeight - statusHeight
+	vpHeight := m.height - taskHeight - stripHeight - approvalHeight - configHeight - modelHeight - compactHeight - slashHeight - inputHeight - statusHeight
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
@@ -542,6 +561,10 @@ func (m *rootModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Same isolation rule for the /model picker.
 	if m.pendingModel != nil {
 		return m.handleModelKey(msg)
+	}
+	// Same isolation rule for the /compact chooser.
+	if m.pendingCompact != nil {
+		return m.handleCompactKey(msg)
 	}
 
 	// Slash-command suggestions intercept nav keys *before* the regular
@@ -680,6 +703,24 @@ func (m *rootModel) submit() (tea.Model, tea.Cmd) {
 		m.input.SetValue("")
 		m.layoutSizes()
 		return m, nil
+	case "/compact":
+		m.openCompactPicker()
+		m.input.SetValue("")
+		m.layoutSizes()
+		return m, nil
+	}
+
+	// Iter-limit takes precedence over the empty-text check: the hint
+	// tells the user "press Enter to continue", and a continue takes no
+	// payload. We allow an empty Enter here so that contract is honored;
+	// the only path forward is startContinue(), which doesn't append a
+	// new user message.
+	if m.state == stateIterLimit {
+		m.input.SetValue("")
+		m.pastedBuf = nil
+		m.startContinue()
+		m.refreshViewport()
+		return m, nil
 	}
 
 	if text == "" {
@@ -711,25 +752,18 @@ func (m *rootModel) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch m.state {
-	case stateIterLimit:
-		m.input.SetValue("")
-		m.pastedBuf = nil
-		m.startContinue()
-	default:
-		// Two views of the same prompt:
-		//   - forAgent: raw paste content inlined, no markers (model
-		//     sees exactly what the user pasted).
-		//   - forView : paste blocks wrapped in boundary markers so
-		//     the user can scroll back and verify the full payload
-		//     is there — head and tail clearly delimited.
-		forAgent := m.expandPastes(text)
-		forView := m.expandPastesForView(text)
-		m.transcript.appendUserPrompt(forView)
-		m.input.SetValue("")
-		m.pastedBuf = nil
-		m.startRun(forAgent)
-	}
+	// Two views of the same prompt:
+	//   - forAgent: raw paste content inlined, no markers (model
+	//     sees exactly what the user pasted).
+	//   - forView : paste blocks wrapped in boundary markers so
+	//     the user can scroll back and verify the full payload
+	//     is there — head and tail clearly delimited.
+	forAgent := m.expandPastes(text)
+	forView := m.expandPastesForView(text)
+	m.transcript.appendUserPrompt(forView)
+	m.input.SetValue("")
+	m.pastedBuf = nil
+	m.startRun(forAgent)
 	m.refreshViewport()
 	return m, nil
 }
@@ -1148,6 +1182,9 @@ func (m *rootModel) View() string {
 	if mp := m.modelPanel(width); mp != "" {
 		sections = append(sections, mp)
 	}
+	if cp := m.compactPanel(width); cp != "" {
+		sections = append(sections, cp)
+	}
 	if sp := m.slashPanel(width); sp != "" {
 		sections = append(sections, sp)
 	}
@@ -1161,6 +1198,7 @@ func (m *rootModel) View() string {
 		Frame:        m.spinnerFrameIdx,
 		ContextUsed:  m.contextUsed(),
 		ContextLimit: contextLimitFor(m.modelName()),
+		AgentID:      m.agentID(),
 	})
 	sections = append(sections, status)
 
@@ -1202,19 +1240,21 @@ func (m *rootModel) refreshBannerMeta() {
 	})
 }
 
-// contextUsed reports total tokens consumed in the session — the sum
-// of cumulative input + output reported via KindUsage. Divided by the
-// model's context window in renderContextBar this gives a meaningful
-// "session burn" indicator that moves on every turn instead of
-// silently sitting at 0% when individual prompts are small.
+// contextUsed reports the size of the current prompt — the input-token
+// count from the most recent agent turn. This is the same signal the
+// auto-compact decision uses, so the bar visibly approaches the
+// threshold and visibly drops after a full compact resets it (e.g.
+// 80% → 40%).
 //
-// Using cumulative (rather than the last turn's prompt size) means the
-// bar can exceed 100% on long, compaction-heavy sessions — that is
-// surfaced by clamping in renderContextBar; the user still sees the
-// bar pinned at 100% which is the right signal ("you've spent your
-// budget").
+// Cumulative session-burn is still tracked in m.usage.InputTokens /
+// OutputTokens (rendered as the "in X / out Y" cells); the bar
+// specifically reflects "how full is the prompt right now" so the
+// user can predict when compact will fire.
 func (m *rootModel) contextUsed() int {
-	return m.usage.InputTokens + m.usage.OutputTokens
+	if m.controller == nil {
+		return 0
+	}
+	return m.controller.Session().LastTurnInputTokens()
 }
 
 // bodyWidth returns the column width usable by transcript / panels /
@@ -1314,6 +1354,16 @@ func (m *rootModel) modelName() string {
 		}
 	}
 	return "-"
+}
+
+// agentID returns the root agent's uuid for the status-bar id cell.
+// shortAgentID truncates it to 8 chars at render time. Empty string
+// when no controller is attached so the cell collapses cleanly.
+func (m *rootModel) agentID() string {
+	if m.controller == nil {
+		return ""
+	}
+	return m.controller.AgentID()
 }
 
 func lineCount(s string) int {

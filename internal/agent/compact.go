@@ -45,15 +45,65 @@ const (
 	summaryToolResultMaxBytes = 600
 )
 
+// Compact is the manual entry point invoked by the TUI's /compact
+// chooser. Unlike the auto path it bypasses the threshold check and
+// the micro→full escalation — the user explicitly picked a kind.
+//
+// Refuses with ErrRunInProgress when a Run is currently driving the
+// loop, same guard SwitchLLM uses; the caller (TUI) surfaces that as
+// a hint rather than queueing.
+//
+// kind is "micro" or "full"; any other value is an error.
+func (a *Agent) Compact(ctx context.Context, kind string) error {
+	if a.IsSubagent() {
+		return fmt.Errorf("agent: subagents do not support manual compaction")
+	}
+	if a.running.Load() {
+		return ErrRunInProgress
+	}
+	if !a.running.CompareAndSwap(false, true) {
+		return ErrRunInProgress
+	}
+	defer a.running.Store(false)
+
+	switch kind {
+	case "micro":
+		a.status = constant.COMPACTING
+		a.emit(event.KindCompacting, func(e *event.Event) {
+			e.Compacting = &event.CompactingPayload{Type: "micro"}
+		})
+		a.logger.Info("compact.manual", "kind", "micro")
+		a.microCompact(a.session)
+		a.status = constant.IDLE
+		return nil
+	case "full":
+		a.status = constant.COMPACTING
+		a.emit(event.KindCompacting, func(e *event.Event) {
+			e.Compacting = &event.CompactingPayload{Type: "full"}
+		})
+		a.logger.Info("compact.manual", "kind", "full")
+		a.fullCompact(ctx, a.session)
+		a.status = constant.IDLE
+		return nil
+	default:
+		return fmt.Errorf("agent: unknown compact kind %q (want \"micro\" or \"full\")", kind)
+	}
+}
+
 // compact runs at the top of every iteration. It compares the last
 // turn's input-token count against the model's context size — when the
 // ratio exceeds the auto-compact threshold the session is reshaped to
 // free room. See package-level note on micro vs full escalation.
+//
+// Every call logs one `compact.check` INFO line with the live inputs
+// and the decision (skip:<reason> / trigger:<kind>) so the workflow is
+// debuggable from grep alone.
 func (a *Agent) compact(ctx context.Context, s *session.Session) {
 	cfg := config.Get()
 
 	if a.IsSubagent() {
 		// no compacting for subagents.
+		a.logger.Info("compact.check", "decision", "skip:subagent")
 		return
 	}
 
@@ -62,6 +112,10 @@ func (a *Agent) compact(ctx context.Context, s *session.Session) {
 	if maxContextSize == 0 {
 		// Unknown model — we can't reason about ratio. Skip rather
 		// than guess, the user keeps the full transcript.
+		a.logger.Info("compact.check",
+			"decision", "skip:unknown_model",
+			"model", string(modelStr),
+		)
 		return
 	}
 	// Ratio is measured against the LAST turn's input tokens, not
@@ -74,18 +128,47 @@ func (a *Agent) compact(ctx context.Context, s *session.Session) {
 	// just had to process, which is what the threshold cares about.
 	currentUsage := a.Session().LastTurnInputTokens()
 	usageRatio := float64(currentUsage) / float64(maxContextSize)
-	if usageRatio < cfg.GetAutoCompactThreshold() {
+	threshold := cfg.GetAutoCompactThreshold()
+	microDone := s.IsMicroCompacted()
+	if usageRatio < threshold {
+		a.logger.Info("compact.check",
+			"decision", "skip:under_threshold",
+			"model", string(modelStr),
+			"max_context", maxContextSize,
+			"last_turn_input", currentUsage,
+			"usage_ratio", usageRatio,
+			"threshold", threshold,
+			"micro_done", microDone,
+		)
 		return // safe.
 	}
 
 	a.status = constant.COMPACTING
 
-	if s.IsMicroCompacted() {
+	if microDone {
+		a.logger.Info("compact.check",
+			"decision", "trigger:full",
+			"model", string(modelStr),
+			"max_context", maxContextSize,
+			"last_turn_input", currentUsage,
+			"usage_ratio", usageRatio,
+			"threshold", threshold,
+			"micro_done", microDone,
+		)
 		a.emit(event.KindCompacting, func(e *event.Event) {
 			e.Compacting = &event.CompactingPayload{Type: "full", UsageRatio: usageRatio}
 		})
 		a.fullCompact(ctx, s)
 	} else {
+		a.logger.Info("compact.check",
+			"decision", "trigger:micro",
+			"model", string(modelStr),
+			"max_context", maxContextSize,
+			"last_turn_input", currentUsage,
+			"usage_ratio", usageRatio,
+			"threshold", threshold,
+			"micro_done", microDone,
+		)
 		a.emit(event.KindCompacting, func(e *event.Event) {
 			e.Compacting = &event.CompactingPayload{Type: "micro", UsageRatio: usageRatio}
 		})
@@ -117,6 +200,9 @@ func (a *Agent) microCompact(s *session.Session) {
 	if len(toolMsgIdx) <= microCompactKeepRecent {
 		s.MicroCompact(msgs)
 		a.logger.Info("compact.micro.skipped", "tool_messages", len(toolMsgIdx))
+		a.emit(event.KindCompactingEnd, func(e *event.Event) {
+			e.CompactingEnd = &event.CompactingEndPayload{Type: "micro", OK: true}
+		})
 		return
 	}
 
@@ -156,7 +242,11 @@ func (a *Agent) microCompact(s *session.Session) {
 		"elided_tool_results", elidedResults,
 		"elided_bytes", elidedBytes,
 		"kept_recent", microCompactKeepRecent,
+		"last_turn_input_after", s.LastTurnInputTokens(),
 	)
+	a.emit(event.KindCompactingEnd, func(e *event.Event) {
+		e.CompactingEnd = &event.CompactingEndPayload{Type: "micro", OK: true}
+	})
 }
 
 // fullCompact summarizes the entire session into a single "context
@@ -173,6 +263,12 @@ func (a *Agent) microCompact(s *session.Session) {
 // The summarization call deliberately passes no tools (we want text,
 // not a tool_use loop) and uses Complete (not Stream) since the brief
 // is internal — no UI painting needed.
+//
+// On success the session's cumulative Usage is RESET to reflect the
+// post-compact context (in=brief size, out=0) so the HUD reads as a
+// fresh start. The pre-compact totals are logged before the reset so
+// forensics keeps working. A matching KindUsage event is emitted so
+// the TUI re-reads m.usage from the new cumulative.
 func (a *Agent) fullCompact(ctx context.Context, s *session.Session) {
 	prompt := buildSummarizationPrompt(s.GetMessages())
 	summarizer := []llm.Message{{Role: llm.RoleUser, Content: prompt}}
@@ -180,16 +276,20 @@ func (a *Agent) fullCompact(ctx context.Context, s *session.Session) {
 	resp, err := a.llm.Complete(ctx, summarizer, nil)
 	if err != nil {
 		a.logger.Warn("compact.full.failed", "err", err)
+		a.emit(event.KindCompactingEnd, func(e *event.Event) {
+			e.CompactingEnd = &event.CompactingEndPayload{Type: "full", OK: false, Err: err.Error()}
+		})
 		return
 	}
 
 	brief := strings.TrimSpace(resp.Content)
 	if brief == "" {
 		a.logger.Warn("compact.full.empty", "model", a.llm.Model())
+		a.emit(event.KindCompactingEnd, func(e *event.Event) {
+			e.CompactingEnd = &event.CompactingEndPayload{Type: "full", OK: false, Err: "empty summary"}
+		})
 		return
 	}
-
-	s.AddUsage(resp.Usage)
 
 	rebuilt := []llm.Message{
 		{
@@ -200,12 +300,33 @@ func (a *Agent) fullCompact(ctx context.Context, s *session.Session) {
 				"\n\nProceed with the Next Step described above.",
 		},
 	}
-	s.FullCompact(rebuilt)
+
+	// Snapshot the pre-compact cumulative so the log still tells us
+	// what we threw away even after FullCompact resets the session's
+	// Usage.
+	preIn := s.Usage.InputTokens
+	preOut := s.Usage.OutputTokens
+	briefTokens := resp.Usage.OutputTokens
+
+	s.FullCompact(rebuilt, briefTokens)
 	a.logger.Info("compact.full",
 		"brief_bytes", len(brief),
 		"summary_in_tokens", resp.Usage.InputTokens,
 		"summary_out_tokens", resp.Usage.OutputTokens,
+		"pre_compact_in", preIn,
+		"pre_compact_out", preOut,
+		"last_turn_input_after", s.LastTurnInputTokens(),
 	)
+
+	// Tell the TUI to redraw the HUD from the now-reset session
+	// totals. Turn is zero (no agent turn just landed) and Cumulative
+	// reflects the post-compact figure.
+	a.emit(event.KindUsage, func(e *event.Event) {
+		e.Usage = &event.UsagePayload{Turn: llm.Usage{}, Cumulative: s.Usage}
+	})
+	a.emit(event.KindCompactingEnd, func(e *event.Event) {
+		e.CompactingEnd = &event.CompactingEndPayload{Type: "full", OK: true, BriefTokens: briefTokens}
+	})
 }
 
 // summarizationInstructions is the front-matter the summarizer sees.

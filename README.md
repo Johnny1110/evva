@@ -423,10 +423,6 @@ Key boundaries:
 
 ## Roadmap
 
-### In progress / next up
-- System prompts refinement (main / explore / general-purpose / agent-specific).
-- Tool implementations: `skill`.
-
 ### Planned
 - **Multimodal Read**: images, PDFs (with `pages` range), Jupyter notebooks.
 - **Overwrite diffs**: proper Myers/Hunt-McIlroy diff for `write_file` overwrites.

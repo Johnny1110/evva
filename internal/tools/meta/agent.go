@@ -239,13 +239,72 @@ func NewAgent(lookup SpawnerLookup, spawnGroup *SpawnGroup) *AgentTool {
 func (t *AgentTool) Name() string { return string(tools.AGENT) }
 
 func (t *AgentTool) Description() string {
-	return "Spawn a sub-agent to handle a focused task in isolation. " +
-		"Use for parallel/independent work, exploration that would dump a lot of context, " +
-		"or any task where you want a clean conversation thread. " +
-		"The sub-agent inherits the parent's LLM provider; pick model tier via `level`: " +
-		"level=1 (default) for routine, level=2 for hard reasoning. " +
-		"Level=2 is more expensive — only use it when the task is complex. " +
-		"Sub-agents cannot themselves call this tool — the hierarchy is exactly one layer deep."
+	return `Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.
+
+Available agent types and the tools they have access to:
+- explore: Fast read-only search agent for locating code. Use it to find files by pattern (e.g. "src/**/*.go"), grep for symbols or keywords, or answer "where is X defined / which files reference Y." Do NOT use it for code review, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: "quick" for a single targeted lookup, "medium" for moderate exploration, or "very thorough" to search across multiple locations and naming conventions.
+- general-purpose: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. Use when searching for a keyword or file and you are not confident you will find the right match in the first few tries.
+
+When using the agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.
+
+When NOT to use the agent tool:
+- If you want to read a specific file path, use the read or glob tool instead — finding the match is faster.
+- If you are searching for a specific class definition like "class Foo", use grep or glob directly — faster than a subagent round-trip.
+- If you are searching for code within a specific file or set of 2–3 files, use read instead — faster.
+- Trivial work: typo fixes, single-line edits, status checks. Three messages is faster than one subagent.
+
+Usage notes:
+- Always include a short description (3–5 words) summarizing what the agent will do.
+- Launch multiple agents concurrently whenever possible — emit several agent tool_use blocks in one assistant turn when the work is independent. They execute in parallel.
+- When the agent is done, it returns a single message back to you. The result is NOT visible to the user. To show the user the result, send a text message back with a concise summary.
+- You can optionally run agents in the background by setting ` + "`async_mode: true`" + `. When async, the spawner returns an ack immediately and the eventual summary is injected into your next turn — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
+- Foreground vs background: use foreground (default) when you need the agent's results before you can proceed; use async when you have genuinely independent work to do in parallel.
+- Each agent invocation starts fresh — provide a complete task description in ` + "`prompt`" + `.
+- The agent's outputs should generally be trusted.
+- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent.
+- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple agent tool_use blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
+- ` + "`level: 2`" + ` costs more — only request it when the task genuinely needs deeper reasoning (subtle bug hunts, architectural calls). Routine searches stay at level 1.
+- Subagents cannot spawn subagents — the hierarchy is exactly one layer deep.
+
+## Writing the prompt
+
+Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
+- Explain what you're trying to accomplish and why.
+- Describe what you've already learned or ruled out.
+- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
+- If you need a short response, say so ("report in under 200 words").
+- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
+
+Terse command-style prompts produce shallow, generic work.
+
+**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
+
+Example usage:
+
+<example>
+user: "What's left on this branch before we can ship?"
+assistant: <thinking>A survey question across git state, tests, and config. I'll delegate it and ask for a short report so the raw command output stays out of my context.</thinking>
+agent({
+  "name": "ship-audit",
+  "description": "Branch ship-readiness audit",
+  "subagent_type": "general-purpose",
+  "prompt": "Audit what's left before this branch can ship. Check: uncommitted changes, commits ahead of main, whether tests exist, whether CI-relevant files changed. Report a punch list — done vs. missing. Under 200 words."
+})
+<commentary>
+The prompt is self-contained: it states the goal, lists what to check, and caps the response length. The agent's report comes back as the tool result; relay the findings to the user.
+</commentary>
+</example>
+
+<example>
+user: "where is the auth middleware wired?"
+assistant: <thinking>I'll use explore — read-only, fast, and the answer is a file/line lookup, not a synthesis task.</thinking>
+agent({
+  "name": "auth-locate",
+  "description": "Find auth middleware",
+  "subagent_type": "explore",
+  "prompt": "Locate the file and exact line where the auth middleware is wired into the HTTP router. Report file:line for both the middleware function definition and its registration. Under 100 words."
+})
+</example>`
 }
 
 func (t *AgentTool) Schema() json.RawMessage {

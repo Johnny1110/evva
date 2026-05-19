@@ -8,6 +8,8 @@ import (
 
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"
+	"github.com/johnny1110/evva/internal/agent/sysprompt"
+	"github.com/johnny1110/evva/internal/constant"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/tools"
 	"github.com/johnny1110/evva/internal/tools/meta"
@@ -41,7 +43,7 @@ func (a *Agent) Spawn(ctx context.Context, req meta.SpawnRequest) (string, error
 		return "", fmt.Errorf("spawn: empty prompt")
 	}
 
-	subProfile, err := subagentProfile(a.profile, req.Kind)
+	subProfile, err := a.subagentProfile(req.Kind)
 	if err != nil {
 		return "", err
 	}
@@ -55,6 +57,7 @@ func (a *Agent) Spawn(ctx context.Context, req meta.SpawnRequest) (string, error
 		WithSink(childSink),
 		WithMaxIterations(int(a.maxIters.Load())), // share iters with child
 		WithAsync(req.AsyncMode),
+		WithAgentRegistry(a.agentRegistry), // subagents inherit the parent's registry
 	)
 	if err != nil {
 		return "", fmt.Errorf("spawn: new agent: %w", err)
@@ -117,44 +120,70 @@ func (a *Agent) Spawn(ctx context.Context, req meta.SpawnRequest) (string, error
 }
 
 // subagentProfile builds a Profile for a subagent of the given kind,
-// inheriting the parent's LLM provider/model/options. Subagent profiles
-// deliberately do NOT include the AGENT tool — the "subagents cannot
-// spawn subagents" invariant is enforced both here (no AGENT in tool list)
-// and in Spawn itself (IsSubagent check).
+// inheriting the parent's LLM provider/model/options. Resolution routes
+// through the parent's agentRegistry — built-ins (Explore, General) and
+// disk-loaded definitions are looked up the same way. The Agent tool's
+// schema enum stays closed in Phase 2, so in practice only built-ins
+// arrive here from the wire; Phase 6 opens the enum to disk agents.
+//
+// Subagent profiles deliberately do NOT include the AGENT tool — the
+// "subagents cannot spawn subagents" invariant is enforced both here
+// (no AGENT in tool list) and in Spawn itself (IsSubagent check).
 //
 // The system prompt is intentionally NOT inherited from the parent —
-// Explore / General each build their own via the sysprompt package so a
-// subagent never accidentally adopts the root's full harness. This is the
-// "distinct system prompt = distinct profile" invariant the Profile
-// constructors document.
+// each subagent profile builds its own via the sysprompt package so a
+// subagent never accidentally adopts the root's full harness.
 //
 // Unknown kinds are an error the caller surfaces to the model.
-func subagentProfile(parent Profile, kind string) (Profile, error) {
+func (a *Agent) subagentProfile(kind string) (Profile, error) {
 	cfg := config.Get()
 	// Strip any system-prompt option the parent picked up. The subagent
 	// constructor will append its own WithSystem; leaving the parent's in
 	// the slice would let it override the subagent's via "last write wins"
 	// in llm.Apply.
-	inherited := withoutSystemOption(parent.LLMOptions)
+	inherited := withoutSystemOption(a.profile.LLMOptions)
+	k := strings.ToLower(strings.TrimSpace(kind))
 
-	switch strings.ToLower(strings.TrimSpace(kind)) {
+	// Empty kind defaults to general-purpose, matching the AGENT tool's
+	// documented behavior.
+	if k == "" || k == "general" {
+		k = "general-purpose"
+	}
+
+	// Teammate is a future agent class with main-agent permissions; reject
+	// explicitly so the model can't accidentally invoke it before its
+	// implementation lands (currently planned for a post-Phase-6 phase).
+	if k == "teammate" {
+		return Profile{}, fmt.Errorf("subagent_type %q is reserved and not yet implemented", kind)
+	}
+
+	// Built-in fast paths. Explore and General are constructed via their
+	// dedicated Profile constructors which carry hard-coded tool lists and
+	// sysprompt builders — duplicating that here would diverge over time.
+	switch k {
 	case "explore":
-		// read-only
-		return Explore(cfg, parent.LLMProvider, parent.LLMModel, inherited), nil
-	case "general-purpose", "general", "":
+		return Explore(cfg, a.profile.LLMProvider, a.profile.LLMModel, inherited), nil
+	case "general-purpose":
 		toolNames := []tools.ToolName{
 			tools.TREE,
 			tools.READ_FILE, tools.WRITE_FILE, tools.EDIT_FILE,
 			tools.BASH, tools.WEB_SEARCH, tools.WEB_FETCH,
 			tools.JSON_QUERY, tools.CALC,
 		}
-		return General(cfg, parent.LLMProvider, parent.LLMModel, inherited, toolNames...), nil
-	case "teammate":
-		// TODO: a strong agent, not a typical subagent. It have same permission as main agent, and free to do his own job in async mode.
-		return Profile{}, fmt.Errorf("not support subagent_type in current version %q (want \"explore\" or \"general-purpose\")", kind)
-	default:
+		return General(cfg, a.profile.LLMProvider, a.profile.LLMModel, inherited, toolNames...), nil
+	}
+
+	// Disk-loaded subagent path. Requires an AgentRegistry; without one
+	// (test harness, legacy callers) we can't resolve disk agents and the
+	// kind is unknown.
+	if a.agentRegistry == nil {
 		return Profile{}, fmt.Errorf("unknown subagent_type %q (want \"explore\" or \"general-purpose\")", kind)
 	}
+	def, ok := a.agentRegistry.Get(k)
+	if !ok || !def.IsSubagent() {
+		return Profile{}, fmt.Errorf("unknown subagent_type %q (want \"explore\" or \"general-purpose\")", kind)
+	}
+	return profileFromDiskAgent(def, cfg, a.profile.LLMProvider, a.profile.LLMModel, inherited), nil
 }
 
 // withoutSystemOption filters out any llm.WithSystem entries from opts. The
@@ -191,4 +220,29 @@ func truncateSummary(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// profileFromDiskAgent constructs a Profile from a disk-loaded
+// AgentDefinition. The definition supplies the system prompt body
+// (system_prompt.md) and the tool lists (tools.yml); LLM provider / model
+// inherit from the parent's profile so the disk agent runs under whatever
+// the user picked at session start. The model override from meta.yml is
+// ignored in Phase 2 — provider-specific model strings need a resolver
+// that doesn't exist yet (Phase 6 may add it).
+//
+// Lives in spawn.go so the sysprompt package doesn't depend on the agent
+// package (Profile lives here; AgentDefinition lives in sysprompt).
+func profileFromDiskAgent(def sysprompt.AgentDefinition, _ *config.AppConfig, provider constant.LLMProvider, model constant.Model, inherited []llm.Option) Profile {
+	ctx := sysprompt.PromptContext{} // disk agents capture their body verbatim; PromptContext is unused for them
+	sp := def.BuildSystemPrompt(ctx)
+	opts := append(inherited, llm.WithSystem(sp))
+	return Profile{
+		Type:          GENERAL_PURPOSE, // closest existing label; Phase 6 may introduce DISK_AGENT
+		SystemPrompt:  sp,
+		ActiveTools:   def.ActiveTools,
+		DeferredTools: def.DeferredTools,
+		LLMProvider:   provider,
+		LLMModel:      model,
+		LLMOptions:    opts,
+	}
 }

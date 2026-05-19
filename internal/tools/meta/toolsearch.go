@@ -17,11 +17,16 @@ type DeferredLookupFn func() DeferredLookup
 
 // ToolSearchTool exposes deferred-tool metadata to the model.
 //
-// It does NOT build or "load" the tool — the only side effect of calling
-// TOOL_SEARCH is returning a JSON block of <function> entries the model
-// can read to learn each tool's name, description, and input schema. The
-// actual build happens later, when the model invokes the tool for real
-// and the agent's loop calls Agent.ResolveTool.
+// Deferred tools appear by name in the system prompt; their full JSON Schemas
+// are pre-injected into the same prompt at session start (see
+// sysprompt.mainDeferredToolsSection). TOOL_SEARCH itself returns a compact
+// JSON envelope — the model has already seen the schemas and uses
+// TOOL_SEARCH for discovery / "is this one available", not schema fetching.
+//
+// This output shape mirrors ref/src/tools/ToolSearchTool/ToolSearchTool.ts.
+// The divergence from ref: ref pre-injects only names and uses Anthropic
+// tool_reference blocks to expand schemas on the wire; evva pre-injects full
+// schemas because not every provider supports tool_reference expansion.
 type ToolSearchTool struct {
 	lookup DeferredLookupFn
 }
@@ -36,14 +41,13 @@ func NewToolSearch(lookup DeferredLookupFn) *ToolSearchTool {
 func (t *ToolSearchTool) Name() string { return string(tools.TOOL_SEARCH) }
 
 func (t *ToolSearchTool) Description() string {
-	return "Fetch the full schema definitions for deferred tools so they can be called.\n\n" +
-		"Deferred tools are advertised by name in the system prompt; their schemas are loaded on demand.\n" +
+	return "Fetches the names of deferred tools that match a query so they can be called.\n\n" +
+		"Deferred tools appear by name in this session's system prompt and their full JSON schemas are pre-loaded there too. Use this tool to discover or confirm which deferred tools match a topic — you do NOT need to call it before invoking a deferred tool whose name you already know.\n\n" +
+		"Result format: a JSON object `{\"matches\": [...], \"query\": \"...\", \"total_deferred_tools\": N}`. The matched names are wire-callable immediately; their schemas are already in the system prompt.\n\n" +
 		"Query forms:\n" +
-		"- \"select:Foo,Bar\" — fetch these exact tool names.\n" +
-		"- \"notebook jupyter\" — fuzzy match over tags (exact/substring/typo/subsequence) plus substring on name and description.\n" +
-		"- \"+slack send\" — require the +-prefixed term (fuzzy-on-tags or substring elsewhere); rank the rest.\n\n" +
-		"Returns a <functions> block with one <function>{...}</function> entry per matched tool. " +
-		"After TOOL_SEARCH the model may call the tool directly; the agent builds it on first use."
+		"- \"select:Read,Edit,Grep\" — fetch these exact tools by name\n" +
+		"- \"notebook jupyter\" — keyword search, up to max_results best matches\n" +
+		"- \"+slack send\" — require \"slack\" in the name, rank by remaining terms"
 }
 
 func (t *ToolSearchTool) Schema() json.RawMessage {
@@ -53,7 +57,7 @@ func (t *ToolSearchTool) Schema() json.RawMessage {
 		"required":["query"],
 		"properties":{
 			"query":{"type":"string","description":"Query: \"select:<name>[,<name>...]\" for exact names, or whitespace-separated keywords (prefix with \"+\" to require the term)."},
-			"max_results":{"type":"integer","minimum":1,"default":5,"description":"Cap the number of returned schemas. Default 5."}
+			"max_results":{"type":"integer","minimum":1,"default":5,"description":"Cap the number of returned matches. Default 5."}
 		}
 	}`)
 }
@@ -61,6 +65,15 @@ func (t *ToolSearchTool) Schema() json.RawMessage {
 type toolSearchInput struct {
 	Query      string `json:"query"`
 	MaxResults int    `json:"max_results"`
+}
+
+// searchOutput mirrors ref's output schema. Field order is fixed (matches,
+// query, total_deferred_tools) so JSON byte-equality tests on the LLM-facing
+// envelope are stable.
+type searchOutput struct {
+	Matches            []string `json:"matches"`
+	Query              string   `json:"query"`
+	TotalDeferredTools int      `json:"total_deferred_tools"`
 }
 
 func (t *ToolSearchTool) Execute(_ context.Context, logger *slog.Logger, input json.RawMessage) (tools.Result, error) {
@@ -88,16 +101,21 @@ func (t *ToolSearchTool) Execute(_ context.Context, logger *slog.Logger, input j
 	if err != nil {
 		return tools.Result{IsError: true, Content: fmt.Sprintf("tool_search: enumerate: %v", err)}, nil
 	}
-	if len(descriptors) == 0 {
-		return tools.Result{Content: "(no deferred tools in this profile)"}, nil
-	}
+	total := len(descriptors)
 
-	matches := search(in.Query, max, descriptors)
-	logger.Debug("toolsearch.result", "matched", len(matches))
-	if len(matches) == 0 {
-		return tools.Result{Content: fmt.Sprintf("(no matches for %q)", in.Query)}, nil
+	matches := searchDescriptors(in.Query, max, descriptors)
+	logger.Debug("toolsearch.result", "matched", len(matches), "total", total)
+
+	out := searchOutput{
+		Matches:            matches,
+		Query:              in.Query,
+		TotalDeferredTools: total,
 	}
-	return tools.Result{Content: formatFunctions(matches)}, nil
+	body, err := json.Marshal(out)
+	if err != nil {
+		return tools.Result{IsError: true, Content: fmt.Sprintf("tool_search: marshal: %v", err)}, nil
+	}
+	return tools.Result{Content: string(body)}, nil
 }
 
 // allDescriptors fetches every deferred descriptor through the lookup and
@@ -126,9 +144,9 @@ func allDescriptors(lookup DeferredLookup) ([]tools.Descriptor, error) {
 	return out, nil
 }
 
-// search ranks descriptors against query under the three documented forms.
-// Returns the top max matches (or fewer if not enough matched).
-func search(query string, max int, all []tools.Descriptor) []tools.Descriptor {
+// searchDescriptors ranks descriptors against query under the three documented
+// query forms. Returns at most max matched names.
+func searchDescriptors(query string, max int, all []tools.Descriptor) []string {
 	q := strings.ToLower(strings.TrimSpace(query))
 
 	// 1. select: form — exact name lookup, preserves the user's order.
@@ -136,7 +154,34 @@ func search(query string, max int, all []tools.Descriptor) []tools.Descriptor {
 		return selectByName(rest, all, max)
 	}
 
-	// 2. Tokenize. "+keyword" tokens are required filters; the rest contribute to score.
+	// 2. Fast path: exact match on a tool name (case-insensitive). Catches
+	//    models typing a bare tool name instead of `select:Name`.
+	for _, d := range all {
+		if strings.EqualFold(d.Name, q) {
+			return []string{d.Name}
+		}
+	}
+
+	// 3. MCP-prefix fast path: query like "mcp__server" returns every tool
+	//    in that server's namespace. Unused today (evva has no MCP tools)
+	//    but kept so Phase 13 doesn't reintroduce the logic.
+	if strings.HasPrefix(q, "mcp__") && len(q) > 5 {
+		var out []string
+		for _, d := range all {
+			if strings.HasPrefix(strings.ToLower(d.Name), q) {
+				out = append(out, d.Name)
+				if len(out) >= max {
+					break
+				}
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+
+	// 4. Tokenize. "+keyword" tokens are required filters; the rest contribute
+	//    to score.
 	var required, optional []string
 	for _, tok := range strings.FieldsFunc(q, func(r rune) bool { return r == ' ' || r == ',' || r == '\t' }) {
 		if tok == "" {
@@ -153,15 +198,21 @@ func search(query string, max int, all []tools.Descriptor) []tools.Descriptor {
 	}
 
 	type scored struct {
-		d     tools.Descriptor
+		name  string
 		score int
 	}
+	scoringTerms := append([]string{}, required...)
+	scoringTerms = append(scoringTerms, optional...)
 	var ranked []scored
 	for _, d := range all {
-		// All required tokens must appear somewhere.
+		parsed := parseToolName(d.Name)
+		descLower := strings.ToLower(d.Description)
+		hintLower := strings.ToLower(d.SearchHint)
+
+		// Required tokens must all hit somewhere.
 		ok := true
 		for _, r := range required {
-			if !hits(d, r) {
+			if !hitsToolForToken(d, parsed, descLower, hintLower, r) {
 				ok = false
 				break
 			}
@@ -171,43 +222,37 @@ func search(query string, max int, all []tools.Descriptor) []tools.Descriptor {
 		}
 
 		s := 0
-		for _, tok := range required {
-			s += scoreTok(d, tok)
+		for _, tok := range scoringTerms {
+			s += scoreToolForToken(d, parsed, descLower, hintLower, tok)
 		}
-		for _, tok := range optional {
-			s += scoreTok(d, tok)
-		}
-		// If the query was nothing but required tokens we already filtered
-		// to matches; keep them even if optional bonus is 0.
 		if s == 0 && len(optional) > 0 {
 			continue
 		}
-		ranked = append(ranked, scored{d: d, score: s})
+		ranked = append(ranked, scored{name: d.Name, score: s})
 	}
 
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].score != ranked[j].score {
 			return ranked[i].score > ranked[j].score
 		}
-		return ranked[i].d.Name < ranked[j].d.Name
+		return ranked[i].name < ranked[j].name
 	})
 	if len(ranked) > max {
 		ranked = ranked[:max]
 	}
-	out := make([]tools.Descriptor, len(ranked))
+	out := make([]string, len(ranked))
 	for i, s := range ranked {
-		out[i] = s.d
+		out[i] = s.name
 	}
 	return out
 }
 
 // selectByName implements "select:a,b,c" — exact (case-insensitive) name
-// lookup; unknown names are silently dropped (the result list is the
-// authoritative signal). Capped at max to match the documented max_results
-// behavior (schema default: 5).
-func selectByName(list string, all []tools.Descriptor, max int) []tools.Descriptor {
+// lookup; unknown names are silently dropped. Capped at max to match the
+// documented max_results behavior (schema default: 5).
+func selectByName(list string, all []tools.Descriptor, max int) []string {
 	wanted := strings.Split(list, ",")
-	out := make([]tools.Descriptor, 0, len(wanted))
+	out := make([]string, 0, len(wanted))
 	for _, w := range wanted {
 		w = strings.TrimSpace(w)
 		if w == "" {
@@ -215,7 +260,7 @@ func selectByName(list string, all []tools.Descriptor, max int) []tools.Descript
 		}
 		for _, d := range all {
 			if strings.EqualFold(d.Name, w) {
-				out = append(out, d)
+				out = append(out, d.Name)
 				break
 			}
 		}
@@ -226,61 +271,44 @@ func selectByName(list string, all []tools.Descriptor, max int) []tools.Descript
 	return out
 }
 
-// scoreTok grants weighted credit for a token. Tags use the layered fuzzy
-// match (exact +4, substring +2, single-typo +2, subsequence/two-typo +1 —
-// see fuzzyTagScore); name and description fall back to substring (+1 each)
-// since they're long-form text where fuzzy matching would over-match.
-func scoreTok(d tools.Descriptor, tok string) int {
-	s := fuzzyTagScore(d.Tags, tok)
-	if strings.Contains(strings.ToLower(d.Name), tok) {
-		s++
+// scoreToolForToken grants weighted credit for tok against one tool. Mirrors
+// the layered scoring from ref TS, with evva's tag-fuzzy bonus added on top.
+func scoreToolForToken(d tools.Descriptor, p parsedName, descLower, hintLower, tok string) int {
+	score := namedPartScore(p, tok)
+
+	// Full-name fallback: only when no part-match landed (matches ref's
+	// `score === 0` guard).
+	if score == 0 && strings.Contains(p.full, tok) {
+		score += scoreFullNameFallback
 	}
-	if strings.Contains(strings.ToLower(d.Description), tok) {
-		s++
+
+	if hintLower != "" {
+		if wordBoundaryPattern(tok).MatchString(hintLower) {
+			score += scoreSearchHint
+		}
 	}
-	return s
+	if descLower != "" {
+		if wordBoundaryPattern(tok).MatchString(descLower) {
+			score += scoreDescription
+		}
+	}
+	// Tag fuzzy bonus — evva-specific (ref TS has no tags field).
+	score += fuzzyTagScore(d.Tags, tok)
+	return score
 }
 
-// hits is the binary version of scoreTok — does this token appear at all?
-// Tags use fuzzy match (so required +tokens tolerate typos); name and
-// description use plain substring.
-func hits(d tools.Descriptor, tok string) bool {
-	if strings.Contains(strings.ToLower(d.Name), tok) {
+// hitsToolForToken is the binary version used by required "+token" filtering.
+func hitsToolForToken(d tools.Descriptor, p parsedName, descLower, hintLower, tok string) bool {
+	for _, part := range p.parts {
+		if part == tok || strings.Contains(part, tok) {
+			return true
+		}
+	}
+	if hintLower != "" && wordBoundaryPattern(tok).MatchString(hintLower) {
 		return true
 	}
-	if strings.Contains(strings.ToLower(d.Description), tok) {
+	if descLower != "" && wordBoundaryPattern(tok).MatchString(descLower) {
 		return true
 	}
 	return fuzzyTagHit(d.Tags, tok)
-}
-
-// funcEntry mirrors the Claude Code <function> JSON shape so models that
-// know that format can parse the output directly.
-type funcEntry struct {
-	Description string          `json:"description"`
-	Name        string          `json:"name"`
-	Parameters  json.RawMessage `json:"parameters"`
-}
-
-// formatFunctions renders the matched descriptors as a <functions> block.
-// Each match becomes one <function>{...}</function> line; the surrounding
-// envelope matches the convention models trained on Claude Code know.
-func formatFunctions(matches []tools.Descriptor) string {
-	var b strings.Builder
-	b.WriteString("<functions>\n")
-	for _, d := range matches {
-		entry := funcEntry{
-			Description: d.Description,
-			Name:        d.Name,
-			Parameters:  d.Schema,
-		}
-		raw, err := json.Marshal(entry)
-		if err != nil {
-			fmt.Fprintf(&b, "<function>{\"name\":%q,\"error\":%q}</function>\n", d.Name, err.Error())
-			continue
-		}
-		fmt.Fprintf(&b, "<function>%s</function>\n", raw)
-	}
-	b.WriteString("</functions>")
-	return b.String()
 }

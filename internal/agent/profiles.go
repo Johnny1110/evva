@@ -33,6 +33,7 @@ import (
 	"github.com/johnny1110/evva/internal/tools/util"
 	"github.com/johnny1110/evva/internal/tools/ux"
 	"github.com/johnny1110/evva/internal/tools/web"
+	"github.com/johnny1110/evva/internal/toolset"
 )
 
 // AgentType enumerates the kinds of agent we know how to bootstrap.
@@ -110,38 +111,60 @@ type Profile struct {
 // Callers who want the old buffered behavior can pass WithStream(false) at
 // agent construction.
 func Main(cfg *config.AppConfig, provider constant.LLMProvider, model constant.Model, skills []sysprompt.SkillRef, mem memdir.Snapshot, options []llm.Option) Profile {
-	ctx := sysprompt.DetectContext(cfg.AppName, cfg.EvvaHome, cfg.AppEnv)
-	ctx.Skills = skills
-	ctx.ProjectMemory = mem.ProjectMemory
-	ctx.UserProfile = mem.UserProfile
-	sp := sysprompt.MainAgent.BuildSystemPrompt(ctx)
-	options = append(options, llm.WithSystem(sp))
-
 	activeTools := slices.Concat(fs.Names(), shell.Names(), meta.Names(), skill.Names())
 	// dev env tools for collect agent feedback
 	if cfg.IsDevelopment() {
 		activeTools = append(activeTools, dev.Names()...)
 	}
+	deferredTools := slices.Concat(
+		task.Names(),
+		monitor.Names(),
+		mode.Names(),
+		notebook.Names(),
+		ux.Names(),
+		cron.Names(),
+		web.Names(),
+		util.Names(),
+	)
+
+	ctx := sysprompt.DetectContext(cfg.AppName, cfg.EvvaHome, cfg.AppEnv)
+	ctx.Skills = skills
+	ctx.ProjectMemory = mem.ProjectMemory
+	ctx.UserProfile = mem.UserProfile
+	ctx.DeferredTools = deferredToolSpecs(deferredTools)
+	sp := sysprompt.MainAgent.BuildSystemPrompt(ctx)
+	options = append(options, llm.WithSystem(sp))
 
 	return Profile{
-		Type:         MAIN,
-		SystemPrompt: sp,
-		ActiveTools:  activeTools,
-		DeferredTools: slices.Concat(
-			task.Names(),
-			monitor.Names(),
-			mode.Names(),
-			notebook.Names(),
-			ux.Names(),
-			cron.Names(),
-			web.Names(),
-			util.Names(),
-		),
-		LLMProvider: provider,
-		LLMModel:    model,
-		LLMOptions:  options,
-		Stream:      false,
+		Type:          MAIN,
+		SystemPrompt:  sp,
+		ActiveTools:   activeTools,
+		DeferredTools: deferredTools,
+		LLMProvider:   provider,
+		LLMModel:      model,
+		LLMOptions:    options,
+		Stream:        false,
 	}
+}
+
+// deferredToolSpecs flattens a list of deferred tool names into the prompt
+// shape sysprompt.PromptContext consumes. Each name is resolved through
+// toolset.Describe — names that don't resolve (unknown, registration race)
+// are dropped rather than erroring; the resulting prompt simply omits them.
+func deferredToolSpecs(names []tools.ToolName) []sysprompt.DeferredToolSpec {
+	out := make([]sysprompt.DeferredToolSpec, 0, len(names))
+	for _, n := range names {
+		d, err := toolset.Describe(n)
+		if err != nil {
+			continue
+		}
+		out = append(out, sysprompt.DeferredToolSpec{
+			Name:        d.Name,
+			Description: d.Description,
+			Schema:      d.Schema,
+		})
+	}
+	return out
 }
 
 // Explore returns a read-only profile: just READ_FILE / GREP / TREE, plus

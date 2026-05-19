@@ -293,7 +293,10 @@ func (a *Agent) execTool(ctx context.Context, call *tools.Call, tool tools.Tool,
 	if err != nil {
 		// Go-level failure, not a tool-reported error.
 		a.logger.Error("tool.exec.fail", "name", call.Name, "err", err)
-		return nil, err
+		return &llm.ToolResult{
+			ID:      call.ID,
+			Content: fmt.Sprintf("evva system level error, detail: %s\n", err.Error()),
+			IsError: true}, err
 	}
 
 	a.logger.Debug("tool.result",

@@ -1,0 +1,12 @@
+active:
+  - tree
+  - read
+  - write
+  - edit
+  - bash
+  - web_search
+  - web_fetch
+  - json_query
+  - calc
+
+deferred: []

@@ -17,12 +17,27 @@
 package sysprompt
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 )
+
+// DeferredToolSpec is the prompt-side view of one deferred tool. The
+// sysprompt package interpolates these into a <functions> block in the
+// main prompt so the model sees full schemas from turn 1 — no
+// tool_search round trip is required to call a deferred tool.
+//
+// Mirrors tools.Descriptor's three LLM-facing fields. The caller
+// (agent.Main) flattens the deferred-tool catalog into []DeferredToolSpec
+// so sysprompt does not depend on internal/tools or internal/toolset.
+type DeferredToolSpec struct {
+	Name        string
+	Description string
+	Schema      json.RawMessage // raw JSON Schema object; rendered verbatim in the <functions> block
+}
 
 // SkillRef is the prompt-side view of a user-installed skill — just the
 // name and description we advertise to the model. The sysprompt package
@@ -51,7 +66,8 @@ type PromptContext struct {
 	Env      string // "dev" | "prod" — dev gates the feedback section.
 
 	// Catalogs
-	Skills []SkillRef // advertised skill list; empty = skip the section.
+	Skills         []SkillRef         // advertised skill list; empty = skip the section.
+	DeferredTools  []DeferredToolSpec // deferred-tool catalog; rendered as a <functions> block in the main prompt. Empty = skip the section.
 
 	// Memory (loaded by internal/memdir)
 	ProjectMemory string // contents of <workdir>/EVVA.md; "" = skip.

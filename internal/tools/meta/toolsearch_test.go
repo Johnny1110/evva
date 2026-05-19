@@ -25,20 +25,12 @@ func testDescriptors() []tools.Descriptor {
 	}
 }
 
-func names(ds []tools.Descriptor) []string {
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = d.Name
-	}
-	return out
-}
-
-func namesEq(got []tools.Descriptor, want []string) bool {
+func eq(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
 	}
 	for i := range got {
-		if got[i].Name != want[i] {
+		if got[i] != want[i] {
 			return false
 		}
 	}
@@ -49,138 +41,133 @@ func namesEq(got []tools.Descriptor, want []string) bool {
 
 func TestSelectByName_ExactMatch(t *testing.T) {
 	got := selectByName("notebook_edit", testDescriptors(), 5)
-	if len(got) != 1 || got[0].Name != "notebook_edit" {
-		t.Fatalf("expected [notebook_edit], got %v", names(got))
+	if !eq(got, []string{"notebook_edit"}) {
+		t.Fatalf("expected [notebook_edit], got %v", got)
 	}
 }
 
 func TestSelectByName_CaseInsensitive(t *testing.T) {
 	got := selectByName("NOTEBOOK_EDIT", testDescriptors(), 5)
-	if len(got) != 1 || got[0].Name != "notebook_edit" {
-		t.Fatalf("expected [notebook_edit], got %v", names(got))
+	if !eq(got, []string{"notebook_edit"}) {
+		t.Fatalf("expected [notebook_edit], got %v", got)
 	}
 }
 
 func TestSelectByName_MultipleAndUnknown(t *testing.T) {
-	// multiple names, unknown silently dropped, preserves order
 	got := selectByName("notebook_edit, nonexistent , calc", testDescriptors(), 10)
 	want := []string{"notebook_edit", "calc"}
-	if !namesEq(got, want) {
-		t.Fatalf("expected %v, got %v", want, names(got))
+	if !eq(got, want) {
+		t.Fatalf("expected %v, got %v", want, got)
 	}
 }
 
 func TestSelectByName_RespectsMaxResults(t *testing.T) {
 	got := selectByName("notebook_edit, web_search, web_fetch, task_create", testDescriptors(), 2)
-	if len(got) != 2 {
-		t.Fatalf("expected cap at 2, got %d: %v", len(got), names(got))
-	}
-	if got[0].Name != "notebook_edit" || got[1].Name != "web_search" {
-		t.Fatalf("expected first 2 in order, got %v", names(got))
+	want := []string{"notebook_edit", "web_search"}
+	if !eq(got, want) {
+		t.Fatalf("expected %v, got %v", want, got)
 	}
 }
 
 func TestSelectByName_EmptyList(t *testing.T) {
 	got := selectByName("", testDescriptors(), 5)
 	if len(got) != 0 {
-		t.Fatalf("expected empty, got %v", names(got))
+		t.Fatalf("expected empty, got %v", got)
 	}
 }
 
-// ---- keyword search (fuzzy tags + name + description) ----
+// ---- keyword search ----
 
 func TestSearch_ExactTagMatch(t *testing.T) {
-	got := search("notebook", 5, testDescriptors())
-	if len(got) == 0 || got[0].Name != "notebook_edit" {
-		t.Fatalf("expected notebook_edit top via exact tag, got %v", names(got))
+	got := searchDescriptors("notebook", 5, testDescriptors())
+	if len(got) == 0 || got[0] != "notebook_edit" {
+		t.Fatalf("expected notebook_edit top via exact tag, got %v", got)
 	}
 }
 
 func TestSearch_TagSubstring(t *testing.T) {
-	got := search("calcu", 5, testDescriptors())
+	got := searchDescriptors("calcu", 5, testDescriptors())
 	// "calcu" is substring of tag "calculate" on calc -> score 2.
-	if len(got) == 0 || got[0].Name != "calc" {
-		t.Fatalf("expected calc top via substring, got %v", names(got))
+	if len(got) == 0 || got[0] != "calc" {
+		t.Fatalf("expected calc top via substring, got %v", got)
 	}
 }
 
 func TestSearch_NameSubstring(t *testing.T) {
-	got := search("task", 5, testDescriptors())
+	got := searchDescriptors("task", 5, testDescriptors())
 	if len(got) < 3 {
-		t.Fatalf("expected >=3 task tools, got %v", names(got))
+		t.Fatalf("expected >=3 task tools, got %v", got)
 	}
-	for _, d := range got {
-		if !strings.HasPrefix(d.Name, "task_") {
-			t.Fatalf("expected only task_* tools, got %s", d.Name)
+	for _, name := range got {
+		if !strings.HasPrefix(name, "task_") {
+			t.Fatalf("expected only task_* tools, got %s", name)
 		}
 	}
 }
 
 func TestSearch_FuzzyTypo(t *testing.T) {
-	got := search("noteboook", 5, testDescriptors())
+	got := searchDescriptors("noteboook", 5, testDescriptors())
 	// "noteboook" (extra 'o') has levenshtein=1 from tag "notebook" -> +2.
-	if len(got) == 0 || got[0].Name != "notebook_edit" {
-		t.Fatalf("expected notebook_edit via typo, got %v", names(got))
+	if len(got) == 0 || got[0] != "notebook_edit" {
+		t.Fatalf("expected notebook_edit via typo, got %v", got)
 	}
 }
 
 func TestSearch_FuzzySubsequence(t *testing.T) {
-	got := search("jpyter", 5, testDescriptors())
-	// "jpyter" is subsequence of tag "jupyter" -> +1.
-	if len(got) == 0 || got[0].Name != "notebook_edit" {
-		t.Fatalf("expected notebook_edit via subsequence, got %v", names(got))
+	got := searchDescriptors("jpyter", 5, testDescriptors())
+	if len(got) == 0 || got[0] != "notebook_edit" {
+		t.Fatalf("expected notebook_edit via subsequence, got %v", got)
 	}
 }
 
 func TestSearch_NoMatch(t *testing.T) {
-	got := search("zzzznonexistent", 5, testDescriptors())
+	got := searchDescriptors("zzzznonexistent", 5, testDescriptors())
 	if len(got) != 0 {
-		t.Fatalf("expected empty, got %v", names(got))
+		t.Fatalf("expected empty, got %v", got)
 	}
 }
 
 // ---- required (+term) filtering ----
 
 func TestSearch_RequiredTermFilters(t *testing.T) {
-	got := search("+web search", 5, testDescriptors())
+	got := searchDescriptors("+web search", 5, testDescriptors())
 	if len(got) == 0 {
 		t.Fatal("expected at least web_search")
 	}
-	for _, d := range got {
-		if !strings.Contains(d.Name, "web") {
-			t.Fatalf("expected only web_* tools, got %s", d.Name)
+	for _, name := range got {
+		if !strings.Contains(name, "web") {
+			t.Fatalf("expected only web_* tools, got %s", name)
 		}
 	}
 }
 
 func TestSearch_RequiredTermTypo(t *testing.T) {
-	// "ntebook" missing 'o' has levenshtein=1 from tag "notebook".
-	got := search("+ntebook", 5, testDescriptors())
-	if len(got) == 0 || got[0].Name != "notebook_edit" {
-		t.Fatalf("expected notebook_edit via fuzzy required, got %v", names(got))
+	got := searchDescriptors("+ntebook", 5, testDescriptors())
+	if len(got) == 0 || got[0] != "notebook_edit" {
+		t.Fatalf("expected notebook_edit via fuzzy required, got %v", got)
 	}
 }
 
 func TestSearch_OnlyRequiredTerms(t *testing.T) {
-	got := search("+web +search", 5, testDescriptors())
-	if len(got) == 0 || got[0].Name != "web_search" {
-		t.Fatalf("expected web_search, got %v", names(got))
+	got := searchDescriptors("+web +search", 5, testDescriptors())
+	if len(got) == 0 || got[0] != "web_search" {
+		t.Fatalf("expected web_search, got %v", got)
 	}
 }
 
 func TestSearch_RequiredTermNoMatch(t *testing.T) {
-	got := search("+nonexistent web", 5, testDescriptors())
+	got := searchDescriptors("+nonexistent web", 5, testDescriptors())
 	if len(got) != 0 {
-		t.Fatalf("expected empty, got %v", names(got))
+		t.Fatalf("expected empty, got %v", got)
 	}
 }
 
 // ---- max_results cap & ranking ----
 
 func TestSearch_RespectsMaxResults(t *testing.T) {
-	got := search("task", 2, testDescriptors())
+	got := searchDescriptors("task", 2, testDescriptors())
 	if len(got) != 2 {
-		t.Fatalf("expected cap at 2, got %d: %v", len(got), names(got))
+		t.Fatalf("expected cap at 2, got %d: %v", len(got), got)
 	}
 }
 
@@ -188,17 +175,91 @@ func TestSearch_RankingByScore(t *testing.T) {
 	descs := []tools.Descriptor{
 		{Name: "a", Tags: []string{"exactmatch"}},
 		{Name: "b", Tags: []string{"exactmatcx"}}, // typo
-		{Name: "c", Tags: []string{"other"}},       // only name hit
+		{Name: "c", Tags: []string{"other"}},      // no hit
 	}
-	got := search("exactmatch", 3, descs)
+	got := searchDescriptors("exactmatch", 3, descs)
 	if len(got) < 2 {
-		t.Fatalf("expected >=2, got %v", names(got))
+		t.Fatalf("expected >=2, got %v", got)
 	}
-	if got[0].Name != "a" {
-		t.Fatalf("expected 'a' top (exact tag +4), got %s", got[0].Name)
+	if got[0] != "a" {
+		t.Fatalf("expected 'a' top (exact tag +4), got %s", got[0])
 	}
-	if got[1].Name != "b" {
-		t.Fatalf("expected 'b' second (typo +2), got %s", got[1].Name)
+	if got[1] != "b" {
+		t.Fatalf("expected 'b' second (typo +2), got %s", got[1])
+	}
+}
+
+// ---- named-part scoring (Phase 2 port from ref TS) ----
+
+func TestSearch_ExactNamePartBeatsDescriptionHit(t *testing.T) {
+	// "edit" exactly matches notebook_edit's name part (+10) and is a
+	// substring of task_update's description (only score +0 from name).
+	descs := []tools.Descriptor{
+		{Name: "notebook_edit"},
+		{Name: "task_update", Description: "edit a task"},
+	}
+	got := searchDescriptors("edit", 5, descs)
+	if len(got) == 0 || got[0] != "notebook_edit" {
+		t.Fatalf("expected notebook_edit (exact name part), got %v", got)
+	}
+}
+
+func TestSearch_SearchHintScoresHigherThanDescription(t *testing.T) {
+	descs := []tools.Descriptor{
+		{Name: "a", SearchHint: "fast shell command runner"},
+		{Name: "b", Description: "fast shell command runner"},
+	}
+	got := searchDescriptors("shell", 5, descs)
+	if len(got) < 2 {
+		t.Fatalf("expected 2 results, got %v", got)
+	}
+	if got[0] != "a" {
+		t.Fatalf("expected 'a' (hint +4) before 'b' (desc +2), got %v", got)
+	}
+}
+
+func TestSearch_FullNameFallback(t *testing.T) {
+	// "webfetch" doesn't match any single part of "web_fetch" but its full
+	// joined name "web fetch" contains "web" — covered by part match.
+	// Test the fallback: query "webfetch" (no part match, no desc match)
+	// against "web_fetch" should... actually parts are ["web","fetch"], so
+	// "webfetch" matches neither part. The full-name fallback ("web fetch"
+	// contains "webfetch"?) is false too. So no match. Confirm no false
+	// positive.
+	descs := []tools.Descriptor{
+		{Name: "web_fetch"},
+	}
+	got := searchDescriptors("webfetch", 5, descs)
+	if len(got) != 0 {
+		t.Fatalf("expected no match for 'webfetch' against 'web_fetch', got %v", got)
+	}
+}
+
+func TestSearch_McpPrefixFastPath(t *testing.T) {
+	descs := []tools.Descriptor{
+		{Name: "mcp__notion__search"},
+		{Name: "mcp__notion__create"},
+		{Name: "mcp__github__list_repos"},
+		{Name: "web_search"},
+	}
+	got := searchDescriptors("mcp__notion", 10, descs)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 notion tools, got %v", got)
+	}
+	for _, name := range got {
+		if !strings.HasPrefix(name, "mcp__notion") {
+			t.Fatalf("expected only mcp__notion__* tools, got %s", name)
+		}
+	}
+}
+
+func TestSearch_BareNameFastPath(t *testing.T) {
+	// Model types a bare tool name instead of "select:bash". The fast path
+	// should return it directly without scoring.
+	descs := testDescriptors()
+	got := searchDescriptors("calc", 5, descs)
+	if len(got) == 0 || got[0] != "calc" {
+		t.Fatalf("expected calc top via bare-name fast path, got %v", got)
 	}
 }
 
@@ -231,7 +292,16 @@ func newToolSearchWith(descs []tools.Descriptor) *ToolSearchTool {
 	})
 }
 
-func TestExecute_SelectReturnsFunctionsBlock(t *testing.T) {
+func decodeSearchOutput(t *testing.T, body string) searchOutput {
+	t.Helper()
+	var out searchOutput
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode output: %v\nbody: %s", err, body)
+	}
+	return out
+}
+
+func TestExecute_SelectReturnsCompactJSON(t *testing.T) {
 	ts := newToolSearchWith(testDescriptors())
 	input := json.RawMessage(`{"query":"select:calc,web_search"}`)
 	res, err := ts.Execute(nil, tools.NopLogger(), input)
@@ -241,11 +311,15 @@ func TestExecute_SelectReturnsFunctionsBlock(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Content)
 	}
-	if !strings.HasPrefix(res.Content, "<functions>") || !strings.HasSuffix(res.Content, "</functions>") {
-		t.Fatalf("expected <functions> wrapper, got: %s", res.Content)
+	out := decodeSearchOutput(t, res.Content)
+	if !eq(out.Matches, []string{"calc", "web_search"}) {
+		t.Fatalf("expected matches [calc,web_search], got %v", out.Matches)
 	}
-	if !strings.Contains(res.Content, "calc") || !strings.Contains(res.Content, "web_search") {
-		t.Fatalf("expected calc and web_search, got: %s", res.Content)
+	if out.Query != "select:calc,web_search" {
+		t.Fatalf("unexpected query: %s", out.Query)
+	}
+	if out.TotalDeferredTools != len(testDescriptors()) {
+		t.Fatalf("unexpected total: %d", out.TotalDeferredTools)
 	}
 }
 
@@ -259,8 +333,9 @@ func TestExecute_KeywordReturnsTopMatch(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Content)
 	}
-	if !strings.Contains(res.Content, "notebook_edit") {
-		t.Fatalf("expected notebook_edit, got: %s", res.Content)
+	out := decodeSearchOutput(t, res.Content)
+	if len(out.Matches) == 0 || out.Matches[0] != "notebook_edit" {
+		t.Fatalf("expected notebook_edit, got %v", out.Matches)
 	}
 }
 
@@ -294,26 +369,34 @@ func TestExecute_LookupReturnsNilError(t *testing.T) {
 	}
 }
 
-func TestExecute_NoDeferredTools(t *testing.T) {
+func TestExecute_NoDeferredToolsReturnsEmptyMatches(t *testing.T) {
 	ts := newToolSearchWith(nil)
 	input := json.RawMessage(`{"query":"task"}`)
 	res, _ := ts.Execute(nil, tools.NopLogger(), input)
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Content)
 	}
-	if !strings.Contains(res.Content, "no deferred tools") {
-		t.Fatalf("expected 'no deferred tools', got: %s", res.Content)
+	out := decodeSearchOutput(t, res.Content)
+	if len(out.Matches) != 0 {
+		t.Fatalf("expected empty matches, got %v", out.Matches)
+	}
+	if out.TotalDeferredTools != 0 {
+		t.Fatalf("expected total=0, got %d", out.TotalDeferredTools)
 	}
 }
 
-func TestExecute_NoMatchMessage(t *testing.T) {
+func TestExecute_NoMatchReturnsEmptyMatches(t *testing.T) {
 	ts := newToolSearchWith(testDescriptors())
 	input := json.RawMessage(`{"query":"zzzznonexistent"}`)
 	res, _ := ts.Execute(nil, tools.NopLogger(), input)
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Content)
 	}
-	if !strings.Contains(res.Content, "no matches") {
-		t.Fatalf("expected 'no matches' message, got: %s", res.Content)
+	out := decodeSearchOutput(t, res.Content)
+	if len(out.Matches) != 0 {
+		t.Fatalf("expected empty matches, got %v", out.Matches)
+	}
+	if out.TotalDeferredTools != len(testDescriptors()) {
+		t.Fatalf("expected total=%d, got %d", len(testDescriptors()), out.TotalDeferredTools)
 	}
 }

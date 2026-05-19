@@ -1,5 +1,7 @@
 package sysprompt
 
+import "github.com/johnny1110/evva/internal/tools"
+
 // AgentDefinition is the Go-side seam for a built-in agent. Phase 2's
 // internal/agent/loader/ will define an AgentRegistry interface that this
 // struct satisfies; for Phase 0 it is a concrete struct since the only
@@ -28,6 +30,46 @@ type AgentDefinition struct {
 	OmitMemory        bool
 	AdvertiseSkills   bool
 	BuildSystemPrompt func(ctx PromptContext) string
+
+	// As controls where this agent appears. Values:
+	//   "main"     — selectable via /profile (Phase 6 picker).
+	//   "subagent" — invokable via the Agent tool's subagent_type.
+	// Both can be set; for built-ins the slice is fixed (Main is main-only;
+	// Explore/General are subagent-only). Disk agents declare this via
+	// meta.yml's `as:` field.
+	As []string
+
+	// ActiveTools / DeferredTools name the tools this agent's profile loads.
+	// Empty means "use the built-in constructor's default" (Main, Explore,
+	// General supply their own lists in agent.Main/Explore/General). For
+	// disk-loaded agents these come from tools.yml.
+	ActiveTools   []tools.ToolName
+	DeferredTools []tools.ToolName
+
+	// Model is the optional model override declared in meta.yml. Empty
+	// means "inherit from parent" (existing built-in behavior).
+	Model string
+}
+
+// IsMain reports whether this agent appears in the /profile picker (Phase 6).
+func (d AgentDefinition) IsMain() bool {
+	for _, v := range d.As {
+		if v == "main" {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSubagent reports whether this agent is invokable via the Agent tool's
+// subagent_type parameter.
+func (d AgentDefinition) IsSubagent() bool {
+	for _, v := range d.As {
+		if v == "subagent" {
+			return true
+		}
+	}
+	return false
 }
 
 // Built-in agent registry. Three vars today; Phase 7 adds PlanAgent;
@@ -39,6 +81,7 @@ var (
 		OmitMemory:        false,
 		AdvertiseSkills:   true,
 		BuildSystemPrompt: buildMainPrompt,
+		As:                []string{"main"},
 	}
 
 	ExploreAgent = AgentDefinition{
@@ -47,6 +90,7 @@ var (
 		OmitMemory:        true,
 		AdvertiseSkills:   false,
 		BuildSystemPrompt: buildExplorePrompt,
+		As:                []string{"subagent"},
 	}
 
 	GeneralAgent = AgentDefinition{
@@ -55,5 +99,6 @@ var (
 		OmitMemory:        true,
 		AdvertiseSkills:   false,
 		BuildSystemPrompt: buildGeneralPrompt,
+		As:                []string{"subagent"},
 	}
 )

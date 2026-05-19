@@ -63,6 +63,12 @@ type Agent struct {
 	deferredAllowlist map[tools.ToolName]struct{}
 	exposeTools       []tools.Tool // this is used for the llm call params(sys prompt) only.
 
+	// agentRegistry is the merged catalog of built-in + disk-loaded agent
+	// definitions. Subagent spawning routes through it; Phase 6 will also
+	// drive the /profile picker off of it. Subagents inherit the parent's
+	// registry via WithAgentRegistry on agent.New.
+	agentRegistry *AgentRegistry
+
 	sink event.Sink // event to ui
 
 	// maxIters is the agent loop's safety cap. Atomic so the TUI's
@@ -114,7 +120,7 @@ func New(parent *Agent, profile Profile, opts ...Option) (*Agent, error) {
 	exposeTools, err := toolset.Build(profile.ActiveTools, toolState)
 	if err != nil {
 		lgr.Error("agent: build active tools failed", "error", err)
-		return nil, fmt.Errorf("agent: build active tools: %w", err)
+		return nil, fmt.Errorf("build active tools: %w", err)
 	}
 	active := make(map[string]tools.Tool, len(exposeTools))
 	for _, t := range exposeTools {

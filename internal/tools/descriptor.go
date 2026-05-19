@@ -17,4 +17,15 @@ type Descriptor struct {
 	Description string
 	Schema      json.RawMessage
 	Tags        []string
+
+	// SearchHint is a short curated capability phrase that the TOOL_SEARCH
+	// matcher prioritizes over the long-form description. One sentence is
+	// enough — think "what would the LLM type to find this tool that isn't
+	// already in the tags or name?". Optional; empty means fall back to
+	// description matching.
+	//
+	// Word-boundary scoring (+4 in TOOL_SEARCH ranking) gives hint matches
+	// stronger signal than description hits (+2) but lower than exact name
+	// part matches.
+	SearchHint string
 }

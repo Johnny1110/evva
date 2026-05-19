@@ -63,10 +63,28 @@ func WithMaxIterations(n int) Option {
 		switch {
 		case n == 0:
 			a.maxIters.Store(int64(cfg.DefaultMaxIterations))
-		case n < 0:
-			a.maxIters.Store(1)
+		case n < 2:
+			a.maxIters.Store(2)
 		default:
 			a.maxIters.Store(int64(n))
 		}
+	}
+}
+
+// WithAgentRegistry installs the merged built-in + disk agent registry on
+// the agent. Subagent spawn resolves through this registry: kinds the
+// AGENT tool's schema enum accepts ("explore", "general-purpose") plus any
+// disk-loaded subagent the registry surfaces once Phase 6 opens the schema.
+//
+// Subagents inherit the same pointer when the spawner forwards it
+// explicitly — see spawn.go where the parent's registry is threaded into
+// child.New so a delegated query (Phase 6's evva → nono pattern) can still
+// look up the disk catalog without rebuilding it.
+//
+// nil clears the registry; in practice the root agent always installs one
+// at startup and subagents inherit it, so nil only appears in tests.
+func WithAgentRegistry(r *AgentRegistry) Option {
+	return func(a *Agent) {
+		a.agentRegistry = r
 	}
 }

@@ -1,15 +1,104 @@
 package meta
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+	"sync"
+)
 
-// Tag-based fuzzy match for TOOL_SEARCH. Tags are short, curated keywords
-// (see toolset.toolTags) — the LLM may type a near-miss like "noteboook" or
-// "jpyter" and we still want to surface the right tool. Names and
-// descriptions stay on plain substring match; only tags get fuzzy treatment
-// because tags are the field we deliberately picked for discovery.
+// Scoring weights ported from ref/src/tools/ToolSearchTool/ToolSearchTool.ts.
+// Comment columns describe what tier each weight covers.
+const (
+	scoreNamePartExact     = 10 // tool name part == token
+	scoreNamePartExactMcp  = 12 // same, MCP-prefixed tool
+	scoreNamePartSubstring = 5  // tool name part contains token
+	scoreNamePartSubMcp    = 6  // same, MCP-prefixed tool
+	scoreFullNameFallback  = 3  // joined name contains token (only when nothing else hit)
+	scoreSearchHint        = 4  // searchHint word-boundary match
+	scoreDescription       = 2  // description word-boundary match
+)
 
-// fuzzyTagScore returns the additive score for tok against tags. Per-tag we
-// take the best of these tiers (lowercase compare; tok must already be lowered):
+// parsedName is the result of parseToolName — what the matcher sees about a
+// tool's identifier, decomposed into matchable parts.
+type parsedName struct {
+	parts []string // lowercased pieces; for "web_fetch" → ["web","fetch"]; for "MyTool" → ["my","tool"]
+	full  string   // space-joined parts; useful for the full-name fallback hit
+	isMcp bool     // true if name starts with "mcp__" — boosts part-match weights
+}
+
+// parseToolName decomposes a tool wire name into matchable parts. MCP tools
+// follow "mcp__<server>__<action>" and split on both `__` and `_`. Regular
+// tools split CamelCase and underscores; evva's snake_case names (read_file,
+// web_fetch) come through as `[read file]` etc.
+func parseToolName(name string) parsedName {
+	if strings.HasPrefix(name, "mcp__") {
+		rest := strings.ToLower(strings.TrimPrefix(name, "mcp__"))
+		var parts []string
+		for _, seg := range strings.Split(rest, "__") {
+			for _, p := range strings.Split(seg, "_") {
+				if p != "" {
+					parts = append(parts, p)
+				}
+			}
+		}
+		return parsedName{parts: parts, full: strings.Join(parts, " "), isMcp: true}
+	}
+
+	s := camelSplitRe.ReplaceAllString(name, "$1 $2")
+	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.ToLower(s)
+	parts := strings.Fields(s)
+	return parsedName{parts: parts, full: strings.Join(parts, " "), isMcp: false}
+}
+
+var camelSplitRe = regexp.MustCompile(`([a-z])([A-Z])`)
+
+// patternCache memoizes compiled word-boundary regexes by token. ToolSearch
+// reuses the same handful of tokens across many tools in one search, so
+// compiling once amortizes well.
+var patternCache sync.Map // map[string]*regexp.Regexp
+
+func wordBoundaryPattern(tok string) *regexp.Regexp {
+	if v, ok := patternCache.Load(tok); ok {
+		return v.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(tok) + `\b`)
+	patternCache.Store(tok, re)
+	return re
+}
+
+// namedPartScore returns the part-match score for tok against a parsed tool
+// name. Mirrors ref's two-tier check (exact part > substring part) with the
+// MCP boost applied uniformly.
+func namedPartScore(p parsedName, tok string) int {
+	for _, part := range p.parts {
+		if part == tok {
+			if p.isMcp {
+				return scoreNamePartExactMcp
+			}
+			return scoreNamePartExact
+		}
+	}
+	for _, part := range p.parts {
+		if strings.Contains(part, tok) {
+			if p.isMcp {
+				return scoreNamePartSubMcp
+			}
+			return scoreNamePartSubstring
+		}
+	}
+	return 0
+}
+
+// --- Legacy fuzzy tag matching ----------------------------------------------
+//
+// Kept around because internal/toolset/tags.go is still the canonical
+// keyword source. Ref TS doesn't use tags; evva does, so we keep tag fuzzy
+// matching as a fallback signal — tags add to a tool's score on top of the
+// ref-style named-part / hint / description tiers above.
+
+// fuzzyTagScore returns the additive tag-match score for tok. Per-tag we take
+// the best of these tiers (lowercase compare; tok must already be lowered):
 //
 //   - tok == tag                             -> +4 (exact)
 //   - strings.Contains(tag, tok)             -> +2 (substring; prior behavior)
@@ -18,9 +107,7 @@ import "strings"
 //   - len(tok)>=5 && levenshtein(tok,tag)<=2 -> +1 (two-edit typo)
 //
 // Length floors exist so short tokens ("go", "ls") don't fuzzy-match
-// unrelated tags by accident. Multiple matching tags accumulate, so a query
-// that touches several tags (e.g. "notebook jupyter" on NOTEBOOK_EDIT)
-// outranks one that touches a single tag.
+// unrelated tags by accident.
 func fuzzyTagScore(tags []string, tok string) int {
 	if tok == "" {
 		return 0
@@ -80,8 +167,7 @@ func isSubsequence(needle, haystack string) bool {
 
 // levenshtein is the classic edit-distance (insert, delete, substitute, cost
 // 1 each). Single-row DP, O(len(a)*len(b)) time, O(len(b)) space. Both args
-// must already be lowercase. Tags are short enough (≤16 chars) that the
-// allocation cost is negligible.
+// must already be lowercase.
 func levenshtein(a, b string) int {
 	if a == b {
 		return 0

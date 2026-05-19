@@ -1,0 +1,24 @@
+# nono is available both as a top-level persona (Phase 6 /profile picker
+# will surface her) and as a subagent evva can delegate to for cross-domain
+# financial work — the "evva → nono" pattern from CLAUDE.md.
+#
+# Until Phase 6 opens the AgentTool's subagent_type enum, the model can
+# load nono via the registry but can't yet invoke her by name through the
+# AGENT tool — the loader still picks her up, which is the point of
+# planting this seam early.
+as:
+  - main
+  - subagent
+
+# Inherit the parent's model in Phase 2 (the loader ignores `model` for now;
+# Phase 6 may add per-agent model resolution). Documented here so the
+# eventual override is a one-line edit, not a schema change.
+model: ""
+
+when_to_use: |
+  Personal financial manager. Delegate questions about budgeting, savings,
+  debt strategy, retirement math, currency conversion, cost-of-living
+  comparisons, mortgage calculations, or any "should I" question that
+  hinges on numbers and assumptions. nono shows her math and flags the
+  inputs that would flip her answer. She refuses specific investment
+  picks and tax strategies that need a licensed professional.

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/johnny1110/evva/internal/constant"
@@ -140,19 +141,6 @@ func (a *Agent) runLoop(ctx context.Context) (string, error) {
 		// are collected in call order so the resulting RoleTool message lines
 		// up with the assistant's ToolCalls by index.
 		toolResults, toolErr := a.dispatchToolCalls(ctx, resp.ToolCalls)
-		a.logger.Debug("turn.end",
-			"iter", iter,
-			"tool_calls", len(resp.ToolCalls),
-			"content_bytes", len(resp.Content),
-			"thinking_bytes", len(resp.Thinking),
-		)
-
-		if toolErr != nil {
-			// Go-level tool failures abort (panics, IO, etc.). Result.IsError
-			// from a tool is already handled inside dispatchToolCalls —
-			// returned as nil error here so the loop continues.
-			return "", a.crush("tool_use", toolErr)
-		}
 
 		// Append a single RoleTool message carrying every result. Providers
 		// fan this out on the wire as they require (Anthropic: one user
@@ -162,6 +150,23 @@ func (a *Agent) runLoop(ctx context.Context) (string, error) {
 			Role:        llm.RoleTool,
 			ToolResults: toolResults,
 		})
+
+		a.logger.Debug("turn.end",
+			"iter", iter,
+			"tool_calls", len(resp.ToolCalls),
+			"content_bytes", len(resp.Content),
+			"thinking_bytes", len(resp.Thinking),
+		)
+		if toolErr != nil {
+			a.logger.Error("dispatchToolCalls have error", "err", toolErr)
+		}
+
+		if toolErr != nil {
+			// Go-level tool failures abort (panics, IO, etc.). Result.IsError
+			// from a tool is already handled inside dispatchToolCalls —
+			// returned as nil error here so the loop continues.
+			return fmt.Sprintf("agent dispatch tool calls error: %s\n", toolErr.Error()), a.crush("tool_use", toolErr)
+		}
 
 		a.turnOver(iter)
 	}
@@ -273,7 +278,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, calls []*tools.Call) ([]*
 	// are discarded since the loop is unwinding.
 	for _, e := range errs {
 		if e != nil {
-			return nil, e
+			return results, e
 		}
 	}
 	return results, nil

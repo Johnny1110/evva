@@ -63,3 +63,72 @@ var toolTags = map[tools.ToolName][]string{
 func TagsFor(name tools.ToolName) []string {
 	return toolTags[name]
 }
+
+// toolHints maps each tool name to a one-sentence capability phrase used by
+// TOOL_SEARCH's ranking. Hints score higher (+4) than description hits (+2)
+// because they're curated, so they should describe the tool's discriminating
+// capability — what makes it different from neighbors, not what it does in
+// general. One sentence per tool, no marketing fluff.
+//
+// Missing entry = empty hint = ranking falls back to description scoring.
+var toolHints = map[tools.ToolName]string{
+	// fs
+	tools.READ_FILE:  "Read a file from disk; supports PDF pages, Jupyter notebooks, and images.",
+	tools.WRITE_FILE: "Overwrite a file's contents or create a new one.",
+	tools.EDIT_FILE:  "Apply a precise old_string -> new_string replacement in an existing file.",
+	tools.GLOB:       "Match file paths against glob patterns sorted by modification time.",
+
+	// shell
+	tools.BASH: "Execute a shell command and return combined stdout/stderr.",
+	tools.GREP: "Regex-search file contents recursively across a directory.",
+	tools.TREE: "Print a directory tree to a given depth.",
+
+	// meta
+	tools.AGENT:           "Spawn a subagent to handle a focused subtask in isolation.",
+	tools.TOOL_SEARCH:     "Discover deferred tools by name or keyword.",
+	tools.SKILL:           "Invoke a user-installed Markdown skill for task-specific instructions.",
+	tools.SCHEDULE_WAKEUP: "Sleep, then re-enter the conversation with a queued prompt.",
+
+	// task
+	tools.TASK_CREATE: "Add a structured task to the in-session task list.",
+	tools.TASK_GET:    "Retrieve full details for one task by ID.",
+	tools.TASK_LIST:   "List every task in the current session with status and dependencies.",
+	tools.TASK_UPDATE: "Change a task's status, owner, subject, or dependencies.",
+	tools.TASK_OUTPUT: "Read stdout/stderr from a backgrounded task (reserved, not implemented).",
+	tools.TASK_STOP:   "Cancel a running background task (reserved, not implemented).",
+
+	// monitor / mode / notebook
+	tools.MONITOR:         "Stream events from a background task or process.",
+	tools.ENTER_PLAN_MODE: "Switch the session into read-only plan mode for design work.",
+	tools.EXIT_PLAN_MODE:  "Exit plan mode and return to the previous permission mode.",
+	tools.ENTER_WORKTREE:  "Create a git worktree for isolated implementation work.",
+	tools.EXIT_WORKTREE:   "Tear down the current worktree and return to the host branch.",
+	tools.NOTEBOOK_EDIT:   "Edit cells in a Jupyter notebook by index.",
+
+	// cron / remote
+	tools.CRON_CREATE:    "Schedule a recurring remote agent run on a cron expression.",
+	tools.CRON_LIST:      "List the user's scheduled remote agent routines.",
+	tools.CRON_DELETE:    "Remove a scheduled remote agent routine.",
+	tools.REMOTE_TRIGGER: "Trigger a remote agent run via webhook.",
+
+	// web
+	tools.WEB_FETCH:  "Fetch and extract readable text from a URL.",
+	tools.WEB_SEARCH: "Search the public web via Tavily for up-to-date information.",
+
+	// ux
+	tools.ASK_USER_QUESTION: "Ask the user a multiple-choice or free-text question during execution.",
+	tools.PUSH_NOTIFICATION: "Send a system notification when the user is away from the terminal.",
+
+	// util
+	tools.JSON_QUERY: "Extract a value from JSON using a dot/bracket path expression.",
+	tools.CALC:       "Evaluate a mathematical expression with full operator support.",
+
+	// dev
+	tools.FEEDBACK: "Report a bug, suggest an improvement, or request a new tool from evva developers.",
+}
+
+// HintFor returns the curated search hint for a tool name, or "" if none is
+// declared. Safe to call for unknown names — returns "".
+func HintFor(name tools.ToolName) string {
+	return toolHints[name]
+}

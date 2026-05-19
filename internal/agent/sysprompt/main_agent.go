@@ -1,5 +1,11 @@
 package sysprompt
 
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
 // buildMainPrompt assembles the full system prompt for the Main agent —
 // evva's root persona. The composition order is fixed because the model
 // reads top-to-bottom: identity first, then where it lives, then any
@@ -33,8 +39,51 @@ func buildMainPrompt(ctx PromptContext) string {
 		mainToolsGuideSection(),
 		mainTaskPlanningSection(),
 		skillsSection(ctx.Skills),
+		mainDeferredToolsSection(ctx.DeferredTools),
 		devSectionIfEnabled(ctx),
 	)
+}
+
+// mainDeferredToolsSection renders the deferred-tool catalog as a <functions>
+// block. The model sees one <function>{...}</function> line per tool with
+// the same encoding as the regular tool list at the top of the prompt, so
+// every deferred tool is wire-callable without a tool_search round trip.
+//
+// Placed near the bottom of the prompt so the upstream cache-control
+// breakpoint (which sits above this section) keeps the catalog out of the
+// re-marshalled prefix on every turn — only the section itself drops out
+// of the cache when the deferred set changes (rare).
+//
+// Empty input returns "" so the joinSections caller drops the heading too.
+func mainDeferredToolsSection(specs []DeferredToolSpec) string {
+	if len(specs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Deferred tools (pre-loaded schemas)\n")
+	b.WriteString("The following tools are deferred — they're advertised by name in this session but you can invoke them directly. Their full input schemas appear in the <functions> block below; treat them exactly like the regular tools at the top of this prompt. Use ")
+	b.WriteString(nameToolSearch)
+	b.WriteString(" only for discovery (\"is there a tool that does X?\"), not to fetch schemas — they are already here.\n\n")
+	b.WriteString("<functions>\n")
+	for _, s := range specs {
+		entry := struct {
+			Description string          `json:"description"`
+			Name        string          `json:"name"`
+			Parameters  json.RawMessage `json:"parameters"`
+		}{
+			Description: s.Description,
+			Name:        s.Name,
+			Parameters:  s.Schema,
+		}
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			fmt.Fprintf(&b, "<function>{\"name\":%q,\"error\":%q}</function>\n", s.Name, err.Error())
+			continue
+		}
+		fmt.Fprintf(&b, "<function>%s</function>\n", raw)
+	}
+	b.WriteString("</functions>")
+	return b.String()
 }
 
 func devSectionIfEnabled(ctx PromptContext) string {
@@ -85,15 +134,15 @@ func mainToolsGuideSection() string {
 		"- Make independent tool calls in parallel — emit multiple tool_use blocks in one assistant turn when they don't depend on each other. Sequence only when one call's output feeds the next.\n" +
 		"- Quote file paths that contain spaces. Use absolute paths; avoid `cd` chains across calls.\n\n" +
 		"## Deferred tools and `" + nameToolSearch + "`\n" +
-		"Some tools are not loaded by default. They appear by name only in `<system-reminder>` messages; their input schemas are NOT in your context yet, so calling them directly will fail with a validation error. To use a deferred tool, first call `" + nameToolSearch + "` to load its schema, then call the tool normally on a later turn.\n\n" +
+		"Some tools are deferred — they don't appear in the main `<functions>` block at the top of this prompt. Their schemas are pre-loaded further down (the \"Deferred tools (pre-loaded schemas)\" section). You can call a deferred tool by name directly whenever you know it exists.\n\n" +
+		"Use `" + nameToolSearch + "` for DISCOVERY: when you're not sure which tool fits the job, or want to confirm a tool is available before relying on it. The result is a compact JSON envelope `{\"matches\": [...], \"query\": \"...\", \"total_deferred_tools\": N}` — names only, no schemas (those are already in your context).\n\n" +
 		"Query forms:\n" +
-		"- `{\"query\": \"select:" + nameTaskCreate + "," + nameTaskUpdate + "\"}` — fetch the named tools' schemas verbatim. Use this when you already know the exact tool names.\n" +
-		"- `{\"query\": \"notebook jupyter\"}` — fuzzy keyword search over tags / names / descriptions. Tolerates typos and subsequences (e.g. \"noteboook\", \"jpyter\" still match).\n" +
-		"- `{\"query\": \"+web search\"}` — the `+`-prefixed term is required; the rest only contribute to ranking. Use when one keyword must appear.\n\n" +
+		"- `{\"query\": \"select:" + nameTaskCreate + "," + nameTaskUpdate + "\"}` — exact-name selection. Useful as a \"does this exist?\" check.\n" +
+		"- `{\"query\": \"notebook jupyter\"}` — keyword search across name / search-hint / description / tags. Tolerates typos and subsequences (e.g. \"noteboook\", \"jpyter\" still match).\n" +
+		"- `{\"query\": \"+web search\"}` — `+`-prefixed term required; the rest only contribute to ranking.\n\n" +
 		"Rules:\n" +
-		"- Don't `" + nameToolSearch + "` speculatively. Load schemas on demand for the work you're about to do.\n" +
-		"- Don't re-search a tool you already loaded — once a deferred tool's schema is in context it stays callable for the rest of the session.\n" +
-		"- If a deferred-tool call fails with \"schema not loaded\" or similar, that means you skipped `" + nameToolSearch + "` — load it, then retry.\n\n" +
+		"- Don't `" + nameToolSearch + "` before every deferred call. Schemas are already loaded — invoke the tool directly.\n" +
+		"- Don't waste a search if you already know the tool name. Skip straight to invoking it.\n\n" +
 		"## Web tools (`" + nameWebSearch + "` / `" + nameWebFetch + "`)\n" +
 		"Reach for these when the answer depends on info past your training cutoff: latest financial news, library versions, new APIs, current events, or a verbatim error-message lookup.\n\n" +
 		"## Json tools (`" + nameJSONQuery + "`)\n" +
@@ -131,9 +180,8 @@ func mainTaskPlanningSection() string {
 		"For any complex goal you think require 3+ distinct steps, plan it explicitly with the `task_*` tools before you start working.\n" +
 		"One goal can only split into 3~15 tasks, and you should follow the plan to do exactly.\n\n" +
 		"How to plan:\n" +
-		"1. Load the task tools once per session: `" + nameToolSearch + "({\"query\": \"select:" + nameTaskCreate + "," + nameTaskUpdate + "," + nameTaskList + "\"})` (others on demand). Skip this step if they're already loaded.\n" +
-		"2. Call `" + nameTaskCreate + "` for each discrete step.\n" +
-		"3. As you start a step, `" + nameTaskUpdate + "` it to `in_progress`. <Only 1 task should be in_progress at a time>.\n" +
-		"4. The moment a step is done, `" + nameTaskUpdate + "` it to `completed`. Don't batch updates at the end of the turn, finish one update one then mark next task as in_progress.\n" +
-		"5. If you discover a new step mid-flight, add it with `" + nameTaskCreate + "`. If a step turns out to be unnecessary, remove and note why."
+		"1. Call `" + nameTaskCreate + "` for each discrete step. (Schemas for `" + nameTaskCreate + "` / `" + nameTaskUpdate + "` / `" + nameTaskList + "` are already loaded in the deferred-tools section below — no `" + nameToolSearch + "` round trip needed.)\n" +
+		"2. As you start a step, `" + nameTaskUpdate + "` it to `in_progress`. <Only 1 task should be in_progress at a time>.\n" +
+		"3. The moment a step is done, `" + nameTaskUpdate + "` it to `completed`. Don't batch updates at the end of the turn, finish one update one then mark next task as in_progress.\n" +
+		"4. If you discover a new step mid-flight, add it with `" + nameTaskCreate + "`. If a step turns out to be unnecessary, remove and note why."
 }

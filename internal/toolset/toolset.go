@@ -20,24 +20,14 @@
 package toolset
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/johnny1110/evva/internal/observable"
 	"github.com/johnny1110/evva/internal/tools"
-	"github.com/johnny1110/evva/internal/tools/cron"
-	"github.com/johnny1110/evva/internal/tools/dev"
 	"github.com/johnny1110/evva/internal/tools/fs"
 	"github.com/johnny1110/evva/internal/tools/meta"
-	"github.com/johnny1110/evva/internal/tools/mode"
-	"github.com/johnny1110/evva/internal/tools/monitor"
-	"github.com/johnny1110/evva/internal/tools/notebook"
-	"github.com/johnny1110/evva/internal/tools/shell"
 	"github.com/johnny1110/evva/internal/tools/skill"
 	"github.com/johnny1110/evva/internal/tools/task"
-	"github.com/johnny1110/evva/internal/tools/util"
-	"github.com/johnny1110/evva/internal/tools/ux"
-	"github.com/johnny1110/evva/internal/tools/web"
 )
 
 // ToolState carries the shared backing state for stateful tool families.
@@ -239,7 +229,7 @@ func (s *ToolState) UserPromptQueue() *UserPromptQueue {
 //
 // Use Build when you actually need to call Execute.
 func Describe(name tools.ToolName) (tools.Descriptor, error) {
-	t, err := buildOne(name, &ToolState{})
+	t, err := DefaultRegistry().Build(name, &ToolState{})
 	if err != nil {
 		return tools.Descriptor{}, err
 	}
@@ -248,126 +238,30 @@ func Describe(name tools.ToolName) (tools.Descriptor, error) {
 		Description: t.Description(),
 		Schema:      t.Schema(),
 		Tags:        TagsFor(name),
+		SearchHint:  HintFor(name),
 	}, nil
 }
 
-// Build resolves each name to a tool instance. Stateful tools pull their
-// backing state from s; stateless tools are package-level singletons.
+// Build resolves each name to a tool instance via the default Registry.
+// Stateful tools pull their backing state from s; stateless tools are
+// package-level singletons.
 //
 // Unknown names return an error — there is no silent fallback.
+//
+// External hosts that need to register additional tools should call
+// DefaultRegistry().Register at startup before agent construction.
 func Build(names []tools.ToolName, s *ToolState) ([]tools.Tool, error) {
 	if s == nil {
 		s = NewToolState()
 	}
+	reg := DefaultRegistry()
 	out := make([]tools.Tool, 0, len(names))
 	for _, n := range names {
-		t, err := buildOne(n, s)
+		t, err := reg.Build(n, s)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, t)
 	}
 	return out, nil
-}
-
-func buildOne(name tools.ToolName, s *ToolState) (tools.Tool, error) {
-	switch name {
-	// --- fs (stateful — share ReadTracker via ToolState) ---
-	case tools.READ_FILE:
-		return fs.NewRead(s.ReadTracker()), nil
-	case tools.WRITE_FILE:
-		return fs.NewWrite(s.ReadTracker()), nil
-	case tools.EDIT_FILE:
-		return fs.NewEdit(s.ReadTracker()), nil
-	case tools.GLOB:
-		return fs.NewGlob(), nil
-
-	// --- shell (stateless) ---
-	case tools.BASH:
-		return shell.Bash, nil
-	case tools.GREP:
-		return shell.Grep, nil
-	case tools.TREE:
-		return shell.Tree, nil
-
-	// --- meta ---
-	case tools.AGENT:
-		// Lookup is late-bound: the agent installs itself via
-		// SetSubagentSpawner after construction, and meta.AgentTool reads
-		// through s.SubagentSpawner at Execute time.
-		return meta.NewAgent(s.SubagentSpawner, s.AgentGroup()), nil
-	case tools.TOOL_SEARCH:
-		// Same late-binding pattern as AGENT — the agent installs itself
-		// as the deferred lookup via SetDeferredLookup after construction.
-		return meta.NewToolSearch(s.DeferredLookup), nil
-	case tools.SKILL:
-		// Same late-binding pattern as AGENT / TOOL_SEARCH — the host
-		// installs the registry via SetSkillRegistry, and skill.NewSkill
-		// reads through it at Execute time.
-		return skill.NewSkill(s.SkillRegistry), nil
-	case tools.SCHEDULE_WAKEUP:
-		return meta.NewWakeup(s.WakeupQueue()), nil
-
-	// --- task (stateful — all six share one *TaskGroup via ToolState) ---
-	case tools.TASK_CREATE:
-		return task.NewCreate(s.TaskStore()), nil
-	case tools.TASK_GET:
-		return task.NewGet(s.TaskStore()), nil
-	case tools.TASK_LIST:
-		return task.NewList(s.TaskStore()), nil
-	case tools.TASK_UPDATE:
-		return task.NewUpdate(s.TaskStore()), nil
-	case tools.TASK_OUTPUT:
-		return task.NewOutput(s.TaskStore()), nil
-	case tools.TASK_STOP:
-		return task.NewStop(s.TaskStore()), nil
-
-	// --- monitor / mode / notebook / cron / web / ux (stateless stubs) ---
-	case tools.MONITOR:
-		return monitor.Monitor, nil
-
-	case tools.ENTER_PLAN_MODE:
-		return mode.EnterPlan, nil
-	case tools.EXIT_PLAN_MODE:
-		return mode.ExitPlan, nil
-	case tools.ENTER_WORKTREE:
-		return mode.EnterWorktree, nil
-	case tools.EXIT_WORKTREE:
-		return mode.ExitWorktree, nil
-
-	case tools.NOTEBOOK_EDIT:
-		return notebook.Edit, nil
-
-	case tools.CRON_CREATE:
-		return cron.Create, nil
-	case tools.CRON_LIST:
-		return cron.List, nil
-	case tools.CRON_DELETE:
-		return cron.Delete, nil
-	case tools.REMOTE_TRIGGER:
-		return cron.Trigger, nil
-
-	case tools.WEB_FETCH:
-		return web.Fetch, nil
-	case tools.WEB_SEARCH:
-		return web.Search, nil
-
-	case tools.ASK_USER_QUESTION:
-		return ux.AskQuestion, nil
-	case tools.PUSH_NOTIFICATION:
-		return ux.Notify, nil
-
-	// --- util ---
-	case tools.JSON_QUERY:
-		return util.JSONQuery, nil
-	case tools.CALC:
-		return util.Calc, nil
-
-	// evva developer tools
-	case tools.FEEDBACK:
-		return dev.Feedback, nil
-
-	default:
-		return nil, fmt.Errorf("toolset: unknown tool %q", name)
-	}
 }

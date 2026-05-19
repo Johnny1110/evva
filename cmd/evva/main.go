@@ -68,15 +68,24 @@ func main() {
 
 	prof := agent.Main(cfg, cfg.DefaultProvider, cfg.DefaultModel, skillRefs, memSnap, buildOptions(*temp, *maxTokens))
 
+	// Build the agent registry: built-in personas (Main, Explore, General)
+	// merged with disk-loaded definitions under <EVVA_HOME>/agents/. Bad
+	// disk agents degrade gracefully — they're skipped with a warning, the
+	// session continues without them.
+	agentReg, agentWarns := agent.BuildAgentRegistry(cfg.EvvaHome)
+	for _, w := range agentWarns {
+		fmt.Fprintln(os.Stderr, "evva:", w.Error())
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	useTUI := !*noTUI && isTTY(os.Stdout)
 	if useTUI {
-		runTUI(ctx, prof, *maxIters, cfg.AppName, cfg.EvvaHome, registry, *uiKind)
+		runTUI(ctx, prof, *maxIters, cfg.AppName, cfg.EvvaHome, registry, agentReg, *uiKind)
 		return
 	}
-	runCLI(ctx, prof, *maxIters, cfg.AppName, registry)
+	runCLI(ctx, prof, *maxIters, cfg.AppName, registry, agentReg)
 }
 
 // skillRefsFromRegistry flattens the merged skill catalog into the
@@ -103,17 +112,19 @@ func skillRefsFromRegistry(r *skill.Registry) []sysprompt.SkillRef {
 // or "v2" (clean-architecture rewrite, in active development). Both
 // satisfy the same ui.UI contract, so the agent-side wiring is
 // identical.
-func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHome string, skills *skill.Registry, kind string) {
+func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHome string, skills *skill.Registry, agents *agent.AgentRegistry, kind string) {
 	var tui ui.UI
 	switch kind {
 	default:
 		tui = bubbleteav2.New(evvaHome)
 	}
+
 	ag, err := agent.New(nil, prof,
 		agent.WithName(name),
 		agent.WithSink(tui),
 		agent.WithMaxIterations(maxIters),
 		agent.WithSkillRegistry(skills),
+		agent.WithAgentRegistry(agents),
 	)
 	if err != nil {
 		exitf(1, "evva: %v", err)
@@ -128,7 +139,7 @@ func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHom
 // Preserves the original behavior: read prompt → run → stream events as
 // plain text → exit. ErrIterLimit triggers a synchronous "press Enter to
 // continue" prompt on stderr.
-func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, skills *skill.Registry) {
+func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, skills *skill.Registry, agents *agent.AgentRegistry) {
 	prompt, err := readPrompt(flag.Args())
 	if err != nil {
 		exitf(2, "evva: %v", err)
@@ -142,6 +153,7 @@ func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, 
 		agent.WithSink(cliSink{out: os.Stdout}),
 		agent.WithMaxIterations(maxIters),
 		agent.WithSkillRegistry(skills),
+		agent.WithAgentRegistry(agents),
 	)
 	if err != nil {
 		exitf(1, "evva: %v", err)

@@ -5,16 +5,19 @@ import (
 )
 
 func TestDeepseekEffort(t *testing.T) {
+	// evva's "low" tier still enables thinking on DeepSeek — "low" is the
+	// fast lane, not no-reasoning. Levels 1–4 send thinking=enabled with
+	// reasoning_effort climbing through medium → high → xhigh → max.
 	tests := []struct {
-		level        int
-		wantThink    bool
-		wantEffort   string
+		level      int
+		wantThink  bool
+		wantEffort string
 	}{
 		{0, false, ""},
-		{1, false, ""},        // low: no thinking
-		{2, true, "high"},     // medium
-		{3, true, "max"},      // high
-		{4, true, "max"},      // ultra
+		{1, true, "medium"}, // evva "low"
+		{2, true, "high"},   // evva "medium" (default)
+		{3, true, "xhigh"},  // evva "high"
+		{4, true, "max"},    // evva "ultra"
 		{5, false, ""},
 	}
 	for _, tt := range tests {

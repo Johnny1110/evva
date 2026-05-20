@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,6 +98,19 @@ type Agent struct {
 	// Shift+Tab cycle).
 	permissionMode atomic.Value // permission.Mode
 
+	// prePlanMode stashes whatever mode was active when EnterPlanMode
+	// flipped the session into ModePlan. ExitPlanMode restores from here
+	// (defaults to ModeDefault when the field is empty — e.g. mode was
+	// already ModePlan before EnterPlanMode was ever called).
+	prePlanMode atomic.Value // permission.Mode
+
+	// workdir is the agent's process working directory, captured once at
+	// construction. Used by the permission gate's plan-file carve-out and
+	// by EnterPlanMode to compute the plan-file path. Stays stable for the
+	// life of the agent — Bash `cd` commands change the shell's cwd but
+	// never the Go process's.
+	workdir string
+
 	// permissionStore + permissionBroker are shared instances. permissionStore
 	// holds project/user/session rules; permissionBroker brokers the
 	// approval back-channel between the gate and the TUI. Both are
@@ -186,6 +200,9 @@ func New(parent *Agent, profile Profile, opts ...Option) (*Agent, error) {
 	a.maxIters.Store(int64(cfg.DefaultMaxIterations))
 	a.effort = cfg.DefaultEffort
 	a.permissionMode.Store(permission.ModeDefault)
+	if wd, err := os.Getwd(); err == nil {
+		a.workdir = wd
+	}
 
 	// adapt options params (e.g. name, sink, maxIters..)
 	for _, opt := range opts {
@@ -199,11 +216,13 @@ func New(parent *Agent, profile Profile, opts ...Option) (*Agent, error) {
 
 	// Install ourselves as the subagent spawner and the deferred-tool
 	// lookup. Only the root agent does this — subagents leave the slots
-	// nil, so the corresponding tools (AGENT, TOOL_SEARCH) surface clear
-	// errors instead of recursing or exposing the wrong agent's allowlist.
+	// nil, so the corresponding tools (AGENT, TOOL_SEARCH, ENTER/EXIT_PLAN_MODE)
+	// surface clear errors instead of recursing or exposing the wrong
+	// agent's allowlist.
 	if !a.IsSubagent() {
 		a.toolState.SetSubagentSpawner(a) // only main agent can have spawner.
 		a.toolState.SetDeferredLookup(a)  // only main agent can have deferred tool lookup.
+		a.toolState.SetPlanController(a)  // only main agent can flip plan mode.
 	}
 
 	effortOpts := append(profile.LLMOptions, llm.WithEffort(llm.ParseEffort(a.effort)))
@@ -491,6 +510,35 @@ func (a *Agent) PermissionStore() *permission.Store { return a.permissionStore }
 
 // PermissionBroker exposes the shared approval back-channel.
 func (a *Agent) PermissionBroker() permission.Broker { return a.permissionBroker }
+
+// Broker is an alias for PermissionBroker that satisfies
+// mode.PlanModeController. Kept short so the controller interface stays
+// terse — EnterPlanMode / ExitPlanMode only know the agent through this
+// interface, not the full *Agent.
+func (a *Agent) Broker() permission.Broker { return a.permissionBroker }
+
+// Workdir returns the process working directory the agent captured at
+// construction. Used by the permission gate's plan-file carve-out and by
+// the EnterPlanMode tool to compute the plan-file path. Empty when
+// os.Getwd failed at startup (unusual).
+func (a *Agent) Workdir() string { return a.workdir }
+
+// PrePlanMode returns the mode that was active immediately before
+// EnterPlanMode flipped the session into ModePlan. Empty until the first
+// EnterPlanMode call; ExitPlanMode falls back to ModeDefault when empty.
+func (a *Agent) PrePlanMode() permission.Mode {
+	v := a.prePlanMode.Load()
+	if v == nil {
+		return ""
+	}
+	m, _ := v.(permission.Mode)
+	return m
+}
+
+// SetPrePlanMode stashes the mode active right before plan-mode entry.
+// Called by EnterPlanMode; read by ExitPlanMode on user-approval to
+// restore the prior stance.
+func (a *Agent) SetPrePlanMode(m permission.Mode) { a.prePlanMode.Store(m) }
 
 // CyclePermissionMode advances the mode in Shift+Tab order and returns
 // the new mode name. Implements ui.Controller.

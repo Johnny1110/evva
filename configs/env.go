@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -34,5 +35,29 @@ func getEnvNullable(key string) *string {
 		return nil
 	}
 	trimmed := strings.TrimSpace(val)
+	return &trimmed
+}
+
+// resolveLogDir picks the directory the logger writes per-agent log
+// files into. Three-way semantics around the LOG_DIR env var:
+//
+//	unset       → "<evvaHome>/logs" (post-`make install` default — users
+//	              never need to configure anything to find their logs)
+//	LOG_DIR=""  → nil (explicit opt-out: stdout-only, dev mode)
+//	LOG_DIR=p   → &p (explicit override to a custom path)
+//
+// The empty-string opt-out is preserved so dev runs with `LOG_DIR=` in
+// front of `go run ./cmd/evva` still print noisy logs to the terminal
+// instead of writing them to disk.
+func resolveLogDir(evvaHome string) *string {
+	val, ok := os.LookupEnv("LOG_DIR")
+	if !ok {
+		def := filepath.Join(evvaHome, "logs")
+		return &def
+	}
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return nil
+	}
 	return &trimmed
 }

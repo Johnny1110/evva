@@ -57,6 +57,9 @@ func TestToolNamesAppearInMainPrompt(t *testing.T) {
 		tools.CALC,
 		tools.FEEDBACK,
 		tools.TODO_WRITE,
+		tools.ASK_USER_QUESTION,
+		tools.ENTER_PLAN_MODE,
+		tools.EXIT_PLAN_MODE,
 	}
 	for _, name := range required {
 		if !contains(prompt, string(name)) {

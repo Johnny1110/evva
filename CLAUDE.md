@@ -161,13 +161,15 @@ This is the **payoff phase** for everything in Phases 0–2: evva, nono, noen be
 - The "subagents cannot spawn subagents" invariant stays in place.
 - TUI refine, add main agent profile name to the status bar (replace curren hardcode evva).
 
-### Phase 7 — Plan mode (EnterPlanMode / ExitPlanMode)
+### Phase 7 — Plan mode (EnterPlanMode / ExitPlanMode) ✅️
 
 Bundled with Phase 3. Plan mode is `permission_mode: plan` plus a `plan_file` workflow, not a freestanding feature.
 
 - Port `ref/src/tools/EnterPlanModeTool/prompt.ts` + `ExitPlanModeTool/prompt.ts`.
+- plan docs can put in project scope, {workdir}/.evva/plans/{plan_name}.md or can follow ref source code.
 - Implement the Plan agent profile — read-only tools only, plan-file output. The skeleton already exists at `internal/agent/profiles.go`.
-- Wire `ExitPlanMode` to restore the previous permission mode (`default` or whatever was active before).
+- Wire `ExitPlanMode` to restore the previous permission mode (`default` or whatever was active before enter plan mode).
+- add user-guide in docs/user-guide to teach user how to use plan mode.
 
 ### Phase 8 — AskUserQuestion
 
@@ -176,7 +178,8 @@ UI-heavy port. The tool surface is small; the TUI does most of the work.
 - Port `ref/src/tools/AskUserQuestionTool/prompt.ts`.
 - TUI: question/answer overlay with single-select, multi-select, and side-by-side preview support (mockups, code snippets, diagrams).
 - Wire the answers + annotations back into the tool result envelope.
-- Integrate with the plan mode, before make the final plan can ask user several questions.
+- Integrate with the plan mode, before make the final plan can ask user several questions with suggest answers/solutions (can adjust EnterPlanMode tool desc).
+- Port ref source code UX, allow user choose question's answer or fill by themself, user can edit all answer before submit all. using left right key to switch questions.
 
 ### Phase 9 — User-profile background agent
 

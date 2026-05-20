@@ -24,13 +24,15 @@ const (
 )
 
 // anthropicEffort maps evva effort levels to Anthropic's native
-// output_config.effort strings:
+// output_config.effort strings. evva's "low" floor is the API's
+// "medium" — evva treats "low" as fast-but-still-thinking, not no-
+// reasoning, so even the lowest tier sends a non-empty effort.
 //
-//	0 → ""       (not set)
-//	1 → "low"
-//	2 → "medium" (default)
-//	3 → "high"
-//	4 → "max"    (evva "ultra")
+//	0 → ""        (not set)
+//	1 → "medium"  (evva "low")
+//	2 → "high"    (evva "medium", default)
+//	3 → "xhigh"   (evva "high")
+//	4 → "max"     (evva "ultra")
 func anthropicEffort(effort int) string {
 	switch effort {
 	case 1:

@@ -3,13 +3,31 @@ package agent
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/tools"
 	"github.com/johnny1110/evva/internal/toolset"
 )
+
+// waitRunningFlag spins until a.running is true or the deadline elapses.
+// Yields to the scheduler each iteration so the goroutine that owns Run
+// gets a chance to run — a busy-spin without Gosched starves the worker
+// on -count>1 runs where Go reuses test goroutines and CPU pinning is
+// unfavorable.
+func waitRunningFlag(a *Agent, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if a.running.Load() {
+			return true
+		}
+		runtime.Gosched()
+	}
+	return a.running.Load()
+}
 
 // TestRun_RejectsReentrantCall locks in the fix for the
 // schedule_wakeup-while-user-types-another-prompt corruption bug. A
@@ -40,12 +58,8 @@ func TestRun_RejectsReentrantCall(t *testing.T) {
 		_, _ = a.Run(context.Background(), "first")
 	}()
 
-	// Spin until the first Run has actually entered the running flag.
-	deadline := 0
-	for !a.running.Load() && deadline < 1_000_000 {
-		deadline++
-	}
-	if !a.running.Load() {
+	// Wait until the first Run has actually entered the running flag.
+	if !waitRunningFlag(a, 2*time.Second) {
 		close(gate)
 		wg.Wait()
 		t.Fatal("first Run never acquired the running flag")
@@ -121,11 +135,7 @@ func TestContinue_RejectsReentrantCall(t *testing.T) {
 		_, _ = a.Continue(context.Background())
 	}()
 
-	deadline := 0
-	for !a.running.Load() && deadline < 1_000_000 {
-		deadline++
-	}
-	if !a.running.Load() {
+	if !waitRunningFlag(a, 2*time.Second) {
 		close(gate)
 		wg.Wait()
 		t.Fatal("first Continue never acquired the running flag")

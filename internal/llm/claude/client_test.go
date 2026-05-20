@@ -203,14 +203,19 @@ func TestToolResultRoundTripJSON(t *testing.T) {
 }
 
 func TestAnthropicEffort(t *testing.T) {
+	// evva's effort ladder maps onto Anthropic's API ladder shifted up one
+	// notch: "low" (evva) → "medium" (api), "medium" → "high",
+	// "high" → "xhigh", "ultra" → "max". Even the lowest tier sends a
+	// non-empty effort because evva's "low" still means fast-thinking,
+	// not no-reasoning.
 	tests := []struct {
 		level int
 		want  string
 	}{
 		{0, ""},
-		{1, "low"},
-		{2, "medium"},
-		{3, "high"},
+		{1, "medium"},
+		{2, "high"},
+		{3, "xhigh"},
 		{4, "max"},
 		{5, ""},
 	}

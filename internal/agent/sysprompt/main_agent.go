@@ -24,11 +24,14 @@ import (
 //  5. harness       — software-engineering conduct rules (Claude-Code-style).
 //  6. tools guide   — dedicated tools, deferred / tool_search protocol,
 //     subagent guidance.
-//  7. todo planning — multi-step work protocol. Tells the model when to
+//  7. plan mode     — when to call enter_plan_mode and the plan-file
+//     workflow. Slotted before todo so the model considers
+//     planning before reaching for the todo list.
+//  8. todo planning — multi-step work protocol. Tells the model when to
 //     reach for todo_write; the tool's own Description holds
 //     the full usage guide.
-//  8. skills        — only if any skills are installed.
-//  9. dev feedback  — only if ctx.Env == "dev".
+//  9. skills        — only if any skills are installed.
+// 10. dev feedback  — only if ctx.Env == "dev".
 func buildMainPrompt(ctx PromptContext) string {
 	return joinSections(
 		identitySection(ctx),
@@ -37,6 +40,7 @@ func buildMainPrompt(ctx PromptContext) string {
 		memorySection("User profile (from USER_PROFILE.md)", ctx.UserProfile),
 		mainHarnessSection(),
 		mainToolsGuideSection(),
+		mainPlanModeSection(),
 		mainTodoSection(),
 		skillsSection(ctx.Skills),
 		mainDeferredToolsSection(ctx.DeferredTools),
@@ -166,6 +170,24 @@ func mainToolsGuideSection() string {
 		"- Don't delegate understanding. The subagent's report is input to your judgment, not a substitute for it. Never write \"based on your findings, do X\" — synthesize first, then act with specifics (file paths, line numbers, exact changes).\n" +
 		"- `level: 2` costs more — only request it when the task genuinely needs deeper reasoning (subtle bug hunts, architectural calls). Routine searches stay at level 1.\n" +
 		"- Subagents cannot spawn subagents — the hierarchy is one layer. Don't ask one to \"use the agent tool to delegate further.\""
+}
+
+// mainPlanModeSection covers when to enter plan mode and the plan-file
+// workflow. The model can flip itself into ModePlan via enter_plan_mode
+// whenever scope warrants up-front alignment; exit_plan_mode signals the
+// plan is ready for user approval. The two tools' own Descriptions hold
+// the full when-to-use guidance — this section advertises the workflow
+// at the harness level so the model considers it before reaching for
+// todo_write or asking clarifying questions.
+func mainPlanModeSection() string {
+	return "# Plan mode\n" +
+		"For non-trivial implementation tasks — new features, architectural decisions, multi-file refactors, anything where multiple reasonable approaches exist — call `" + nameEnterPlanMode + "` BEFORE you start writing code. It flips the session into a read-only stance, gives you a dedicated plan file to compose into, and gates the next step on user approval.\n\n" +
+		"Skip plan mode for typos, single-function additions, pure research, and tasks the user has already scoped specifically. When the right move is a small clarification rather than a full plan, use `" + nameAskUserQ + "`.\n\n" +
+		"Workflow once in plan mode:\n" +
+		"1. Explore freely with `" + nameRead + "`, `" + nameGrep + "`, `" + nameGlob + "`, `" + nameTree + "`, `" + nameAgent + "`. Every other write is denied — the only path you may write is the plan file path emitted by `" + nameEnterPlanMode + "`'s result.\n" +
+		"2. Compose the plan as markdown into that file. Sections: Context, Design, Critical files, Verification. Keep it scannable.\n" +
+		"3. When the plan is finalized, call `" + nameExitPlanMode + "`. It reads the plan file you wrote, shows it to the user, and waits for approval. On approval the prior permission mode is restored; on rejection the user's reason comes back to you and you iterate.\n\n" +
+		"Do NOT call `" + nameAskUserQ + "` to ask \"is this plan okay?\" — `" + nameExitPlanMode + "` IS that signal."
 }
 
 // mainTodoSection tells the model when to reach for `todo_write`. The full

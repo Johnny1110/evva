@@ -13,6 +13,7 @@
 - [5. 對話紀錄搜尋](#5-對話紀錄搜尋)
 - [6. 權限系統](#6-權限系統)
   - [權限模式](#權限模式)
+  - [計畫模式（`enter_plan_mode` / `exit_plan_mode`)](#計畫模式enter_plan_mode--exit_plan_mode)
   - [核准提示](#核准提示)
   - [權限規則](#權限規則)
 - [7. 子代理與人格](#7-子代理與人格)
@@ -307,6 +308,45 @@ CLI 參數優先；持久性預設值可寫入 `evva-config.yml`：
 permission_mode: default     # default | accept_edits | plan | bypass
 ```
 
+### 計畫模式（`enter_plan_mode` / `exit_plan_mode`）
+
+計畫模式是 `permission_mode: plan` 搭配兩個模型可呼叫的工具自動化整個流程。模型在處理非平凡任務（新功能、架構決策、跨多檔重構）時可自行切入計畫模式；你也能透過 `Shift+Tab` 手動進入。
+
+**完整流程：**
+
+1. **進入** — 模型呼叫 `enter_plan_mode`（或你用 `Shift+Tab` 切到 `plan`）。狀態列顯示 `⛨ plan`。除了一個專用的計畫檔之外，所有寫入都會被拒絕。
+2. **計畫檔** — `<workdir>/.evva/plans/current.md`。每個 session 一份。`enter_plan_mode` 會建立或清空此檔；模型用一般的 `write` / `edit` 將計畫以 markdown 寫入此處。權限把關僅對這個確切路徑開放；其他任何寫入目標仍會被硬性拒絕，並顯示 *「plan mode forbids writes — Shift+Tab to exit plan mode」*。
+3. **探索** — `read`、`grep`、`glob`、`tree`、`agent`（派生 `explore` 子代理）全部自動允許。模型藉此調查程式碼庫、起草計畫並反覆修改。
+4. **退出** — 計畫完成後，模型呼叫 `exit_plan_mode`。evva 從磁碟讀取計畫檔並彈出 **Plan Approval** 覆蓋層，將 markdown 內容顯示出來：
+
+```
+┌─ PLAN APPROVAL ────────────────────────────────────┐
+│ tool: exit_plan_mode                               │
+│ mode: plan                                         │
+│ reason: Plan approval — review and approve to exit │
+│                                                    │
+│ plan:                                              │
+│   # Phase 7 — Plan Mode                            │
+│   ## Context                                       │
+│   …                                                │
+│   ## Design                                        │
+│   …                                                │
+│                                                    │
+│ ▶ [1] Allow once     (核准計畫並退出模式)          │
+│   [2] Allow for…     (計畫場景幾乎用不到)          │
+│   [3] Deny           (退回 — 模型會迭代)           │
+└────────────────────────────────────────────────────┘
+```
+
+- **核准**（`1` / Enter）— 退出計畫模式，還原為先前的模式（`default` / `accept_edits` / 進入 `enter_plan_mode` 前的任何模式），模型開始實作。
+- **拒絕**（`3` / Esc）— 鍵入一行原因；模型會收到 `"User requested changes: <原因>"`，留在計畫模式繼續修改計畫檔。
+
+**注意事項：**
+
+- 系統提示已告知模型：`exit_plan_mode` 就是核准信號，絕不能用 `ask_user_question` 問「這個計畫可以嗎？」。
+- 子代理無法翻轉父 session 的計畫模式 — `enter_plan_mode` / `exit_plan_mode` 僅限根代理使用。
+- 計畫檔在退出後仍會保留；下一次 `enter_plan_mode` 會清空它。若想保留某份計畫，請在重新進入計畫模式前先把 `current.md` 複製出 `.evva/plans/`。
+
 ### 核准提示
 
 在 `default` / `accept_edits` / `plan` 模式下，任何需要核准的操作都會彈出模態對話框：
@@ -591,7 +631,7 @@ providers:
 APP_ENV=dev            # dev | prod
 LOG_LEVEL=info         # debug | info | warn | error
 LOG_FORMAT=text        # text | json
-LOG_DIR=               # 留空 → stdout；填寫路徑 → 將日誌寫入該目錄
+LOG_DIR=               # 未設定 → $EVVA_HOME/logs（預設）；填寫路徑 → 自訂目錄；明確設為空 → 改用 stdout
 SKILLS_DIR=skills      # ~/.evva/ 下的子路徑
 USER_PROFILE=user_profile.md
 ```
@@ -621,4 +661,4 @@ echo "list files in /tmp" | evva -no-tui   # 管線輸入提示
 
 ## 11. 日誌
 
-每個代理的 JSON 日誌預設存放於 `log/<agent-id>/<agent-id>.log`。可在 `.env` 中設定 `LOG_DIR` 來重新導向，或保留空白以同時輸出至 stdout。`LOG_LEVEL=debug` 會揭露每次迭代的 `turn.start` / `llm.call` / `tool.dispatch` / `tool.result` 行——在除錯代理卡住或無限迴圈時非常實用。
+每個代理的純文字日誌預設存放於 `$EVVA_HOME/logs/<agent-id>/<agent-id>.log`——`make install` 之後不需要額外設定即可找到。若要改寫到其他目錄，在 `.env` 中設定 `LOG_DIR=/your/path`。若要回到舊的 stdout-only 開發模式(日誌打到終端而非寫檔)，將 `LOG_DIR=` 明確設為空字串。`LOG_LEVEL=debug` 會揭露每次迭代的 `turn.start` / `llm.call` / `tool.dispatch` / `tool.result` 行——在除錯代理卡住或無限迴圈時非常實用。

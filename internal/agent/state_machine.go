@@ -349,7 +349,7 @@ func (a *Agent) permissionGate(ctx context.Context, call *tools.Call) (bool, *ll
 	hint := buildHint(call)
 
 	pcall := permission.ToolCall{Name: call.Name, Input: call.Input}
-	d := permission.Decide(pcall, mode, store, hint)
+	d := permission.Decide(pcall, mode, store, hint, a.workdir)
 
 	if d.Behavior == permission.BehaviorAsk {
 		if a.permissionBroker == nil {

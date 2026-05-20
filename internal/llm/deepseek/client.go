@@ -116,13 +116,15 @@ type apiThinking struct {
 	Type string `json:"type"` // "enabled"
 }
 
-// deepseekEffort maps evva effort levels to DeepSeek reasoning_effort:
+// deepseekEffort maps evva effort levels to DeepSeek reasoning_effort.
+// evva's "low" floor still enables thinking — "low" means fast tier,
+// not no-reasoning, so every level 1–4 sends thinking=enabled.
 //
-//	0 → ""   (thinking disabled)
-//	1 → ""   (low: no thinking, fast)
-//	2 → "high"  (medium)
-//	3 → "max"   (high)
-//	4 → "max"   (ultra)
+//	0 → think=nil,     effort=""        (thinking disabled)
+//	1 → think=enabled, effort="medium"  (evva "low")
+//	2 → think=enabled, effort="high"    (evva "medium")
+//	3 → think=enabled, effort="xhigh"   (evva "high")
+//	4 → think=enabled, effort="max"     (evva "ultra")
 func deepseekEffort(effort int) (think *apiThinking, reasoningEffort string) {
 	switch effort {
 	case 1:

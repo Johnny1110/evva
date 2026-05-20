@@ -107,13 +107,21 @@ func (t *GrepTool) Execute(ctx context.Context, logger *slog.Logger, input json.
 	return tools.Result{Content: cleaned, IsError: res.IsError}, nil
 }
 
-// stripBinaryLines removes "Binary file X matches" lines that grep emits
-// when it encounters non-text files (not all systems support -I).
+// stripBinaryLines removes the per-grep-implementation "binary file matches"
+// diagnostic lines so they don't pollute the model-facing result.
+//
+// GNU grep emits:        "Binary file <path> matches"
+// ugrep emits (stderr):  "grep: <path>: binary file matches"
+// BSD/macOS grep emits:  "Binary file <path> matches"
+//
+// We match the common substring "binary file matches" (case-insensitive)
+// rather than committing to one format — every implementation we've seen
+// includes those three words verbatim.
 func stripBinaryLines(s string) string {
 	lines := strings.Split(s, "\n")
 	out := lines[:0]
 	for _, line := range lines {
-		if strings.HasPrefix(line, "Binary file ") && strings.HasSuffix(line, " matches") {
+		if strings.Contains(strings.ToLower(line), "binary file matches") {
 			continue
 		}
 		out = append(out, line)

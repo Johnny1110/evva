@@ -245,7 +245,11 @@ func (a *Approval) View(width int, th *theme.Theme) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(th.PanelHeader.Render("▰ APPROVAL"))
+	header := "▰ APPROVAL"
+	if a.req.PlanContent != "" {
+		header = "▰ PLAN APPROVAL"
+	}
+	b.WriteString(th.PanelHeader.Render(header))
 	b.WriteByte('\n')
 
 	b.WriteString(th.StatusKey.Render("tool: "))
@@ -268,7 +272,13 @@ func (a *Approval) View(width int, th *theme.Theme) string {
 		b.WriteByte('\n')
 	}
 
-	if summary := summarizeInput(a.req.ToolInput); summary != "" {
+	if a.req.PlanContent != "" {
+		b.WriteString("\n")
+		b.WriteString(th.StatusKey.Render("plan:"))
+		b.WriteByte('\n')
+		b.WriteString(renderPlanContent(a.req.PlanContent, innerWidth, th))
+		b.WriteByte('\n')
+	} else if summary := summarizeInput(a.req.ToolInput); summary != "" {
 		b.WriteString("\n")
 		b.WriteString(th.DimText.Render("input: "))
 		b.WriteString(th.StatusValue.Render(truncateOneLine(summary, innerWidth-9)))
@@ -306,6 +316,71 @@ func (a *Approval) View(width int, th *theme.Theme) string {
 	b.WriteByte('\n')
 	b.WriteString(th.FooterHint.Render(a.Hint()))
 	return th.InputBorder.Render(strings.TrimRight(b.String(), "\n"))
+}
+
+// renderPlanContent draws the markdown plan body inside the approval
+// overlay. v1 keeps the rendering simple — line-wrap to innerWidth, dim
+// the body, cap at planPreviewLines so a giant plan doesn't blow out the
+// terminal. The user can read the file directly for the full version.
+func renderPlanContent(body string, innerWidth int, th *theme.Theme) string {
+	const planPreviewLines = 30
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	var out []string
+	for _, ln := range lines {
+		out = append(out, wrapPlanLine(ln, innerWidth-2)...)
+		if len(out) >= planPreviewLines {
+			break
+		}
+	}
+	truncated := false
+	if len(out) > planPreviewLines {
+		out = out[:planPreviewLines]
+		truncated = true
+	} else if len(lines) > 0 && len(out) == planPreviewLines {
+		// Reached the cap mid-source — flag truncation.
+		// Rough check: more raw lines than rendered rows.
+		consumed := 0
+		for _, ln := range lines {
+			consumed += len(wrapPlanLine(ln, innerWidth-2))
+			if consumed >= planPreviewLines {
+				break
+			}
+		}
+		if consumed > planPreviewLines || len(lines) > planPreviewLines {
+			truncated = true
+		}
+	}
+	var b strings.Builder
+	for _, ln := range out {
+		b.WriteString("  ")
+		b.WriteString(th.StatusValue.Render(ln))
+		b.WriteByte('\n')
+	}
+	if truncated {
+		b.WriteString(th.DimText.Render("  … plan truncated; full content in the plan file"))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func wrapPlanLine(line string, width int) []string {
+	if width <= 0 {
+		return []string{line}
+	}
+	if len(line) <= width {
+		return []string{line}
+	}
+	var out []string
+	for len(line) > width {
+		out = append(out, line[:width])
+		line = line[width:]
+	}
+	if line != "" {
+		out = append(out, line)
+	}
+	return out
 }
 
 func riskColor(hint string) lipgloss.Style {

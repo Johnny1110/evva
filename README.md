@@ -123,7 +123,7 @@ Place in your working directory or at `~/.evva/.env`. Only used for deployment /
 APP_ENV=dev            # dev | prod
 LOG_LEVEL=info         # debug | info | warn | error
 LOG_FORMAT=text        # text | json
-LOG_DIR=               # empty → stdout; path → write log files there
+LOG_DIR=               # unset → $EVVA_HOME/logs (default); path → custom dir; explicit empty → stdout-only
 SKILLS_DIR=skills      # subpath under ~/.evva/
 USER_PROFILE=user_profile.md
 ```

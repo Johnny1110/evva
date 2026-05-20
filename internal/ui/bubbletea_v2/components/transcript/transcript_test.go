@@ -402,6 +402,69 @@ func TestPlainTextStripsGutter(t *testing.T) {
 	}
 }
 
+// TestThinkingSpriteStaysAtTail verifies the sprite-as-anchor
+// invariant: once ShowThinkingSprite mounts the sprite, every
+// subsequent block (text, tool, thinking, user prompt, synthetic)
+// inserts BEFORE it so the sprite reads as sitting at the end of
+// the latest output, not stranded at the top.
+func TestThinkingSpriteStaysAtTail(t *testing.T) {
+	tr := newTestTranscript(t, 80)
+	tr.ShowThinkingSprite()
+
+	// Initial: just the sprite.
+	if got := len(tr.blocks); got != 1 {
+		t.Fatalf("expected 1 block (sprite), got %d", got)
+	}
+	if tr.blocks[0] != tr.thinkingSprite {
+		t.Fatalf("expected sprite at index 0")
+	}
+
+	// Stream a few events of different kinds; sprite must stay at tail.
+	tr.IngestEvent(event.Event{Kind: event.KindText, Text: &event.TextPayload{Text: "hello"}})
+	tr.IngestEvent(event.Event{
+		Kind: event.KindToolUseStart,
+		ToolUseStart: &event.ToolUseStartPayload{
+			Name: "bash", ToolID: "t1", Input: json.RawMessage(`{"command":"ls"}`),
+		},
+	})
+	tr.IngestEvent(event.Event{Kind: event.KindThinking, Thinking: &event.TextPayload{Text: "pondering"}})
+	tr.AppendUserPrompt("another prompt")
+	tr.AppendSynthetic("synthetic note")
+
+	// Every append must land before the sprite — so the sprite is the
+	// last entry in blocks.
+	n := len(tr.blocks)
+	if n < 2 {
+		t.Fatalf("expected multiple blocks after appends, got %d", n)
+	}
+	if tr.blocks[n-1] != tr.thinkingSprite {
+		t.Errorf("sprite must be at the tail; got index %d of %d", indexOfBlock(tr.blocks, tr.thinkingSprite), n)
+	}
+
+	// Hide and verify the sprite is gone.
+	tr.HideThinkingSprite()
+	if tr.HasThinkingSprite() {
+		t.Errorf("HideThinkingSprite did not clear the sprite")
+	}
+	if tr.thinkingSprite != nil {
+		t.Errorf("thinkingSprite field not cleared")
+	}
+	for i, b := range tr.blocks {
+		if _, ok := b.(*ThinkingSpriteBlock); ok {
+			t.Errorf("sprite still in blocks at index %d after hide", i)
+		}
+	}
+}
+
+func indexOfBlock(blocks []Block, target Block) int {
+	for i, b := range blocks {
+		if b == target {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestStripANSI sanity — the PlainText helper strips lipgloss output.
 func TestStripANSI(t *testing.T) {
 	styled := theme.Default().ToolCall.Render("◢ bash({})")

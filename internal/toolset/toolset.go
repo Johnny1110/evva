@@ -26,6 +26,7 @@ import (
 	"github.com/johnny1110/evva/internal/tools"
 	"github.com/johnny1110/evva/internal/tools/fs"
 	"github.com/johnny1110/evva/internal/tools/meta"
+	"github.com/johnny1110/evva/internal/tools/mode"
 	"github.com/johnny1110/evva/internal/tools/skill"
 	"github.com/johnny1110/evva/internal/tools/todo"
 )
@@ -42,6 +43,7 @@ type ToolState struct {
 	todoStore       *todo.TodoStore
 	subagentSpawner meta.SubagentSpawner
 	deferredLookup  meta.DeferredLookup
+	planController  mode.PlanModeController
 	readTracker     *fs.ReadTracker
 	subAgentGroup   *meta.SpawnGroup
 	wakeupQueue     *meta.WakeupQueue
@@ -153,6 +155,22 @@ func (s *ToolState) DeferredLookup() meta.DeferredLookup {
 // satisfies meta.DeferredLookup.
 func (s *ToolState) SetDeferredLookup(d meta.DeferredLookup) {
 	s.deferredLookup = d
+}
+
+// PlanController returns the currently-installed plan-mode controller,
+// or nil if none. The EnterPlanMode / ExitPlanMode tools read through
+// this lookup at Execute time so the *Agent can register itself after
+// agent.New returns without an init ordering hazard.
+func (s *ToolState) PlanController() mode.PlanModeController {
+	return s.planController
+}
+
+// SetPlanController installs the controller EnterPlanMode / ExitPlanMode
+// will mutate. The agent layer calls this exactly once after construction;
+// only the root agent satisfies the interface (subagents inherit nil and
+// the tools surface a clear error if invoked there).
+func (s *ToolState) SetPlanController(c mode.PlanModeController) {
+	s.planController = c
 }
 
 // ReadTracker returns the session read-tracker shared by all fs tools,

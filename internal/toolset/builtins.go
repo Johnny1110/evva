@@ -47,10 +47,14 @@ func registerBuiltins(r *Registry) {
 	// --- todo (stateful — backed by one *TodoStore via ToolState) ---
 	r.MustRegister(tools.TODO_WRITE, func(s *ToolState) (tools.Tool, error) { return todo.NewWrite(s.TodoStore()), nil })
 
-	// --- monitor / mode / notebook (stateless stubs) ---
+	// --- monitor / mode / notebook ---
 	r.MustRegister(tools.MONITOR, func(s *ToolState) (tools.Tool, error) { return monitor.Monitor, nil })
-	r.MustRegister(tools.ENTER_PLAN_MODE, func(s *ToolState) (tools.Tool, error) { return mode.EnterPlan, nil })
-	r.MustRegister(tools.EXIT_PLAN_MODE, func(s *ToolState) (tools.Tool, error) { return mode.ExitPlan, nil })
+	r.MustRegister(tools.ENTER_PLAN_MODE, func(s *ToolState) (tools.Tool, error) {
+		return mode.NewEnterPlanMode(s.PlanController), nil
+	})
+	r.MustRegister(tools.EXIT_PLAN_MODE, func(s *ToolState) (tools.Tool, error) {
+		return mode.NewExitPlanMode(s.PlanController), nil
+	})
 	r.MustRegister(tools.ENTER_WORKTREE, func(s *ToolState) (tools.Tool, error) { return mode.EnterWorktree, nil })
 	r.MustRegister(tools.EXIT_WORKTREE, func(s *ToolState) (tools.Tool, error) { return mode.ExitWorktree, nil })
 	r.MustRegister(tools.NOTEBOOK_EDIT, func(s *ToolState) (tools.Tool, error) { return notebook.Edit, nil })

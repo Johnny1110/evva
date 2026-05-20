@@ -199,13 +199,14 @@ func buildApprovalEvent(req permission.ApprovalRequest) event.Event {
 		Kind:    event.KindApprovalNeeded,
 		AgentID: req.AgentID,
 		ApprovalNeeded: &event.ApprovalNeededPayload{
-			RequestID: req.ID,
-			ToolName:  req.ToolName,
-			ToolInput: req.ToolInput,
-			Mode:      string(req.Mode),
-			Reason:    req.Reason,
-			RiskHint:  riskHint,
-			Matched:   req.Hint.Matched,
+			RequestID:   req.ID,
+			ToolName:    req.ToolName,
+			ToolInput:   req.ToolInput,
+			Mode:        string(req.Mode),
+			Reason:      req.Reason,
+			RiskHint:    riskHint,
+			Matched:     req.Hint.Matched,
+			PlanContent: req.PlanContent,
 		},
 	}
 }

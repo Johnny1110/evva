@@ -139,7 +139,7 @@ func (t *Transcript) AppendBlock(b Block) {
 		return
 	}
 	t.resetInflight()
-	t.blocks = append(t.blocks, b)
+	t.appendKeepingSprite(b)
 }
 
 // AppendUserPrompt records a prompt the user just submitted.
@@ -149,7 +149,7 @@ func (t *Transcript) AppendBlock(b Block) {
 func (t *Transcript) AppendUserPrompt(text string) {
 	t.resetInflight()
 	t.toolBlocks = nil
-	t.blocks = append(t.blocks, newUserPromptBlock(sanitizeForTranscript(text)))
+	t.appendKeepingSprite(newUserPromptBlock(sanitizeForTranscript(text)))
 }
 
 // AppendSynthetic injects a pre-formatted styled block. The text
@@ -159,7 +159,30 @@ func (t *Transcript) AppendSynthetic(text string) {
 		return
 	}
 	t.resetInflight()
-	t.blocks = append(t.blocks, newSyntheticBlock(text))
+	t.appendKeepingSprite(newSyntheticBlock(text))
+}
+
+// appendKeepingSprite is the canonical append helper for every block
+// other than the thinking sprite itself. When the sprite is mounted,
+// it stays anchored at the tail of the blocks slice — new content
+// slides in just before it so the "walking sprite" reads as sitting
+// at the end of the latest output rather than getting stranded above
+// streaming text and tool blocks.
+//
+// When the sprite isn't mounted, this collapses to a plain append.
+func (t *Transcript) appendKeepingSprite(b Block) {
+	if b == nil {
+		return
+	}
+	n := len(t.blocks)
+	if t.thinkingSprite != nil && n > 0 && t.blocks[n-1] == t.thinkingSprite {
+		// Insert b at position n-1; push the sprite to position n.
+		// Single grow-and-shift — cheaper than two separate slice ops.
+		t.blocks = append(t.blocks, t.thinkingSprite)
+		t.blocks[n-1] = b
+		return
+	}
+	t.blocks = append(t.blocks, b)
 }
 
 // Reset wipes all blocks except the banner. Used by /clear and by
@@ -359,13 +382,13 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 	case event.KindThinking:
 		t.resetInflight()
 		if e.Thinking != nil && e.Thinking.Text != "" {
-			t.blocks = append(t.blocks, newThinkingBlock(sanitizeForTranscript(e.Thinking.Text)))
+			t.appendKeepingSprite(newThinkingBlock(sanitizeForTranscript(e.Thinking.Text)))
 			return true
 		}
 	case event.KindText:
 		t.resetInflight()
 		if e.Text != nil && e.Text.Text != "" {
-			t.blocks = append(t.blocks, newTextBlock(sanitizeForTranscript(e.Text.Text)))
+			t.appendKeepingSprite(newTextBlock(sanitizeForTranscript(e.Text.Text)))
 			return true
 		}
 	case event.KindThinkingChunk:
@@ -378,7 +401,7 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 		} else {
 			b := newThinkingBlock(chunk)
 			t.inflightThink = b
-			t.blocks = append(t.blocks, b)
+			t.appendKeepingSprite(b)
 		}
 		return true
 	case event.KindTextChunk:
@@ -391,7 +414,7 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 		} else {
 			b := newTextBlock(chunk)
 			t.inflightText = b
-			t.blocks = append(t.blocks, b)
+			t.appendKeepingSprite(b)
 		}
 		return true
 	case event.KindToolUseStart:
@@ -399,7 +422,7 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 			t.resetInflight()
 			hideResult := e.ToolUseStart.Name == string(tools.TOOL_SEARCH)
 			tb := newToolBlock(e.ToolUseStart.Name, e.ToolUseStart.ToolID, e.ToolUseStart.Input, hideResult)
-			t.blocks = append(t.blocks, tb)
+			t.appendKeepingSprite(tb)
 			if t.toolBlocks == nil {
 				t.toolBlocks = map[string]*ToolBlock{}
 			}
@@ -425,7 +448,7 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 			}
 			cb := newCompactingBlock(e.Compacting.Type)
 			t.compacting = cb
-			t.blocks = append(t.blocks, cb)
+			t.appendKeepingSprite(cb)
 			return true
 		}
 	case event.KindCompactingEnd:
@@ -450,28 +473,28 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 		}
 	case event.KindDrainingInfo:
 		t.resetInflight()
-		t.blocks = append(t.blocks, newDrainingBlock())
+		t.appendKeepingSprite(newDrainingBlock())
 		return true
 	case event.KindError:
 		if e.Error != nil {
 			t.resetInflight()
-			t.blocks = append(t.blocks, newErrorBlock(e.Error.Stage, e.Error.Err.Error()))
+			t.appendKeepingSprite(newErrorBlock(e.Error.Stage, e.Error.Err.Error()))
 			return true
 		}
 	case event.KindRunCancelled:
 		t.resetInflight()
-		t.blocks = append(t.blocks, newCancelledBlock())
+		t.appendKeepingSprite(newCancelledBlock())
 		return true
 	case event.KindTurnEnd:
 		if e.Turn != nil {
 			t.resetInflight()
-			t.blocks = append(t.blocks, newTurnEndBlock(e.Turn.Iteration))
+			t.appendKeepingSprite(newTurnEndBlock(e.Turn.Iteration))
 			return true
 		}
 	case event.KindIterLimit:
 		if e.IterLimit != nil {
 			t.resetInflight()
-			t.blocks = append(t.blocks, newIterLimitBlock(e.IterLimit.Reached))
+			t.appendKeepingSprite(newIterLimitBlock(e.IterLimit.Reached))
 			return true
 		}
 	}
@@ -510,7 +533,7 @@ func (t *Transcript) attachToolResult(r *event.ToolUseResultPayload) bool {
 	// the result body alone.
 	stub := newToolBlock("?", r.ToolID, nil, false)
 	stub.SetResult(content, r.IsError, diffMeta, r.ContentBlocks)
-	t.blocks = append(t.blocks, stub)
+	t.appendKeepingSprite(stub)
 	if t.toolBlocks == nil {
 		t.toolBlocks = map[string]*ToolBlock{}
 	}

@@ -2,6 +2,7 @@ package fs
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,11 +33,14 @@ func TestResolvePathExpandsTilde(t *testing.T) {
 // (running under sudo) but $SUDO_USER names the real user, `~/x`
 // resolves against the real user's home — the exact bug the user filed.
 //
-// We use user.Lookup so this test only runs meaningfully when the test
-// process has a valid passwd entry available; skip otherwise.
+// The test needs a SUDO_USER whose homedir differs from /root (otherwise
+// the assertion can't distinguish HOME shadowing from correct behavior).
+// We look up the current user first; when running as root (CI containers,
+// rootful docker) we fall back to scanning /etc/passwd for any local user
+// whose homedir is not /root. Skipping when no such user exists keeps the
+// test meaningful on minimal images.
 func TestResolvePathHonorsSudoUser(t *testing.T) {
-	// Skip on systems where we can't look up the current user (rare).
-	username := lookupCurrentUsername(t)
+	username, homeDir := sudoUserCandidate(t)
 
 	t.Setenv("HOME", "/root")
 	t.Setenv("SUDO_USER", username)
@@ -46,7 +50,7 @@ func TestResolvePathHonorsSudoUser(t *testing.T) {
 		t.Fatalf("resolvePath: %v", err)
 	}
 	if strings.HasPrefix(got, "/root/") {
-		t.Fatalf("path leaked /root — got %q (HOME shadowed SUDO_USER)", got)
+		t.Fatalf("path leaked /root — got %q (HOME shadowed SUDO_USER %q -> %q)", got, username, homeDir)
 	}
 	if !strings.HasSuffix(got, "/tmp/notes.md") {
 		t.Fatalf("unexpected expansion: %q", got)
@@ -105,4 +109,24 @@ func lookupCurrentUsername(t *testing.T) string {
 	}
 	t.Skip("cannot determine current username from env")
 	return ""
+}
+
+// sudoUserCandidate returns a (username, homeDir) pair suitable for
+// driving the SUDO_USER-shadows-HOME test. Prefers the current user (the
+// common path on dev laptops); when the current user is root or has
+// homedir /root, falls back to /etc/passwd scanning for any user whose
+// homedir is real and not /root. Skips the test when no candidate exists
+// (minimal containers without local accounts beyond root).
+func sudoUserCandidate(t *testing.T) (string, string) {
+	t.Helper()
+	if u, err := user.Current(); err == nil && u.HomeDir != "" && u.HomeDir != "/root" {
+		return u.Username, u.HomeDir
+	}
+	for _, name := range []string{"nobody", "daemon", "bin", "mail", "games", "www-data", "ubuntu"} {
+		if u, err := user.Lookup(name); err == nil && u.HomeDir != "" && u.HomeDir != "/root" {
+			return u.Username, u.HomeDir
+		}
+	}
+	t.Skip("no local user with a non-/root homedir to use as SUDO_USER candidate")
+	return "", ""
 }

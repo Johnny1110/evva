@@ -12,6 +12,46 @@
 // app.
 package permission
 
+import (
+	"path/filepath"
+	"strings"
+)
+
+// PlanDirSegment is the workdir-relative directory that EnterPlanMode writes
+// plan files into. Decide() carves out write-allow for paths under this
+// segment even in ModePlan so the model can compose its plan while everything
+// else stays read-only.
+const PlanDirSegment = ".evva/plans"
+
+// IsPlanFilePath reports whether absPath sits inside <workdir>/.evva/plans/.
+// Both args are resolved with filepath.Abs + filepath.Clean before comparison
+// so callers can pass user-supplied paths without pre-normalising. An empty
+// workdir or relative absPath that can't be resolved returns false (the
+// carve-out should never apply when the caller can't prove containment).
+func IsPlanFilePath(workdir, absPath string) bool {
+	if workdir == "" || absPath == "" {
+		return false
+	}
+	wd, err := filepath.Abs(workdir)
+	if err != nil {
+		return false
+	}
+	p, err := filepath.Abs(absPath)
+	if err != nil {
+		return false
+	}
+	root := filepath.Join(wd, filepath.FromSlash(PlanDirSegment))
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	// filepath.Rel returns "." for the root itself; "..pieces" for outside.
+	if rel == "." || rel == "" {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
+}
+
 // Mode is one of the four permission stances. The model is intentionally
 // small: each mode pins a clear safelist, and the gate's pipeline (deny
 // rules → ask rules → mode safelist → allow rules → ask) is the same
@@ -159,15 +199,17 @@ var ReadOnlyOrSelfTools = map[string]bool{
 	"web_search":        true,
 	"json_query":        true,
 	"calc":              true,
-	"task_create":       true,
-	"task_get":          true,
-	"task_list":         true,
-	"task_update":       true,
 	"todo_write":        true,
 	"ask_user_question": true,
 	"agent":             true,
 	"tool_search":       true,
 	"skill":             true,
+	// Plan-mode coordination — the model must be able to enter and exit
+	// plan mode while ModePlan denies everything else. Both are otherwise
+	// session-state-only (they don't touch the filesystem outside of the
+	// plan file, which has its own carve-out in Decide()).
+	"enter_plan_mode": true,
+	"exit_plan_mode":  true,
 }
 
 // AcceptEditsAutoAllow is the set of tools auto-allowed in addition to

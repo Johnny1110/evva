@@ -13,6 +13,7 @@
 - [5. Transcript Search](#5-transcript-search)
 - [6. Permission System](#6-permission-system)
   - [Permission Modes](#permission-modes)
+  - [Plan Mode (`enter_plan_mode` / `exit_plan_mode`)](#plan-mode-enter_plan_mode--exit_plan_mode)
   - [Approval Prompts](#approval-prompts)
   - [Permission Rules](#permission-rules)
 - [7. Sub-agents and Personas](#7-sub-agents-and-personas)
@@ -307,6 +308,45 @@ The CLI flag takes precedence; a persistent default lives in `evva-config.yml`:
 permission_mode: default     # default | accept_edits | plan | bypass
 ```
 
+### Plan Mode (`enter_plan_mode` / `exit_plan_mode`)
+
+Plan mode is `permission_mode: plan` with two model-callable tools that automate the workflow. The model can flip itself into plan mode for non-trivial tasks (new features, architectural decisions, multi-file refactors); you can also enter manually with `Shift+Tab`.
+
+**The workflow:**
+
+1. **Enter** — model calls `enter_plan_mode` (or you cycle to `plan` via `Shift+Tab`). The status bar reads `⛨ plan`. Every write is denied **except** to a single dedicated plan file.
+2. **Plan file** — `<workdir>/.evva/plans/current.md`. One plan per session. `enter_plan_mode` creates / truncates this file; the model writes its plan there as markdown using normal `write` / `edit` calls. The permission gate carves out this exact path; any other write target still hard-denies with *"plan mode forbids writes — Shift+Tab to exit plan mode."*
+3. **Explore** — `read`, `grep`, `glob`, `tree`, `agent` (spawning an `explore` subagent) all auto-allow. The model investigates the codebase, drafts the plan, iterates.
+4. **Exit** — when the plan is ready, the model calls `exit_plan_mode`. evva reads the plan file from disk and pops a **Plan Approval** overlay showing the markdown body:
+
+```
+┌─ PLAN APPROVAL ────────────────────────────────────┐
+│ tool: exit_plan_mode                               │
+│ mode: plan                                         │
+│ reason: Plan approval — review and approve to exit │
+│                                                    │
+│ plan:                                              │
+│   # Phase 7 — Plan Mode                            │
+│   ## Context                                       │
+│   …                                                │
+│   ## Design                                        │
+│   …                                                │
+│                                                    │
+│ ▶ [1] Allow once     (approve plan, exit mode)     │
+│   [2] Allow for…     (rarely useful for plans)     │
+│   [3] Deny           (reject — model iterates)     │
+└────────────────────────────────────────────────────┘
+```
+
+- **Approve** (`1` / Enter) — plan mode exits, the previous mode is restored (`default` / `accept_edits` / whatever was active before `enter_plan_mode`), the model proceeds to implementation.
+- **Deny** (`3` / Esc) — type a one-line reason; the model receives `"User requested changes: <reason>"`, stays in plan mode, and iterates on the plan file.
+
+**Notes:**
+
+- The model is told `exit_plan_mode` IS the approval signal — it must not call `ask_user_question` to ask "is this plan okay?".
+- Subagents can't flip the parent session's plan mode — `enter_plan_mode` / `exit_plan_mode` are root-agent only.
+- Plan files persist after exit; the next `enter_plan_mode` truncates them. To keep a plan around, copy `current.md` out of `.evva/plans/` before re-entering plan mode.
+
 ### Approval Prompts
 
 In `default` / `accept_edits` / `plan` modes, anything that needs your approval opens a modal:
@@ -591,7 +631,7 @@ Place in your working directory or at `~/.evva/.env`. Only used for deployment /
 APP_ENV=dev            # dev | prod
 LOG_LEVEL=info         # debug | info | warn | error
 LOG_FORMAT=text        # text | json
-LOG_DIR=               # empty → stdout; path → write log files there
+LOG_DIR=               # unset → $EVVA_HOME/logs (default); path → custom dir; explicit empty → stdout-only
 SKILLS_DIR=skills      # subpath under ~/.evva/
 USER_PROFILE=user_profile.md
 ```
@@ -621,4 +661,4 @@ echo "list files in /tmp" | evva -no-tui   # piped prompt
 
 ## 11. Logs
 
-Per-agent JSON logs land under `log/<agent-id>/<agent-id>.log` by default. Set `LOG_DIR` in `.env` to redirect, or leave it unset to also stream to stdout. `LOG_LEVEL=debug` exposes every iteration's `turn.start` / `llm.call` / `tool.dispatch` / `tool.result` lines — handy when debugging an agent that's stuck or looping.
+Per-agent text logs land under `$EVVA_HOME/logs/<agent-id>/<agent-id>.log` by default — no setup needed after `make install`. To redirect to a custom directory, set `LOG_DIR=/your/path` in `.env`. To revert to the old stdout-only dev mode (logs streamed to the terminal instead of disk), set `LOG_DIR=` explicitly to empty. `LOG_LEVEL=debug` exposes every iteration's `turn.start` / `llm.call` / `tool.dispatch` / `tool.result` lines — handy when debugging an agent that's stuck or looping.

@@ -339,7 +339,7 @@ func load() *AppConfig {
 		// log
 		LogLevel:  getEnvDefaultLowerCase("LOG_LEVEL", "info"),
 		LogFormat: getEnvDefaultLowerCase("LOG_FORMAT", "text"),
-		LogDir:    getEnvNullable("LOG_DIR"),
+		LogDir:    resolveLogDir(EVVA_HOME),
 
 		// global config .evva
 		EvvaHome:            EVVA_HOME,

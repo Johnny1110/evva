@@ -113,13 +113,17 @@ type Profile struct {
 // agent construction.
 func Main(cfg *config.AppConfig, provider constant.LLMProvider, model constant.Model, skills []sysprompt.SkillRef, mem memdir.Snapshot, options []llm.Option) Profile {
 	activeTools := slices.Concat(fs.Names(), shell.Names(), meta.Names(), skill.Names(), todo.Names())
+	// enter/exit_plan_mode are always-active on Main so the model can flip
+	// the session into ModePlan without a tool_search round-trip. The
+	// worktree pair stays deferred (Phase 10).
+	activeTools = append(activeTools, tools.ENTER_PLAN_MODE, tools.EXIT_PLAN_MODE)
 	// dev env tools for collect agent feedback
 	if cfg.IsDevelopment() {
 		activeTools = append(activeTools, dev.Names()...)
 	}
 	deferredTools := slices.Concat(
 		monitor.Names(),
-		mode.Names(),
+		modeDeferredNames(),
 		notebook.Names(),
 		ux.Names(),
 		cron.Names(),
@@ -216,6 +220,21 @@ func mainProfileFromDiskAgent(def sysprompt.AgentDefinition, cfg *config.AppConf
 		LLMModel:      model,
 		LLMOptions:    options,
 	}
+}
+
+// modeDeferredNames returns the mode-package tools that stay deferred on
+// the Main profile. enter/exit_plan_mode are pulled out into ActiveTools
+// (they need to be wire-callable without a tool_search round-trip);
+// worktree stays deferred until Phase 10 lands a real implementation.
+func modeDeferredNames() []tools.ToolName {
+	out := make([]tools.ToolName, 0, 2)
+	for _, n := range mode.Names() {
+		if n == tools.ENTER_PLAN_MODE || n == tools.EXIT_PLAN_MODE {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // deferredToolSpecs flattens a list of deferred tool names into the prompt

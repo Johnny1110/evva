@@ -10,7 +10,7 @@ import (
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/attachments"
 	"github.com/johnny1110/evva/internal/agent/event"
-	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/pkg/constant"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/permission"
 	"github.com/johnny1110/evva/internal/tools"

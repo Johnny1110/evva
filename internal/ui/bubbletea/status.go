@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/pkg/constant"
 	"github.com/johnny1110/evva/internal/llm"
 )
 

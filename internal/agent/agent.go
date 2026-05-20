@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/pkg/constant"
 
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"

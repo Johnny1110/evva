@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/pkg/constant"
 	"github.com/joho/godotenv"
 )
 

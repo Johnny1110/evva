@@ -18,7 +18,7 @@ import (
 	"fmt"
 
 	config "github.com/johnny1110/evva/configs"
-	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/pkg/constant"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/llm/claude"
 	"github.com/johnny1110/evva/internal/llm/deepseek"

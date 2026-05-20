@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	config "github.com/johnny1110/evva/configs"
-	"github.com/johnny1110/evva/internal/constant"
+	"github.com/johnny1110/evva/pkg/constant"
 )
 
 // pendingConfig is the /config form's in-flight state. A single overlay

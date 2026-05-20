@@ -137,9 +137,203 @@ evva -max-tokens 2048               # per-completion output cap (overrides YAML)
 evva -max-iters 40                  # loop iteration cap (overrides YAML)
 evva -permission-mode=plan          # boot in plan mode (read-only; see "Permission modes")
 evva -permission-mode=bypass        # boot with the gate disabled
+evva -no-hooks                      # disable user-authored hooks for this run (see "Hooks")
 evva -no-tui "explain loop.go"      # one-shot plain-text mode
 echo "list files in /tmp" | evva -no-tui   # piped prompt
 ```
+
+---
+
+## Hooks
+
+Hooks are user-authored shell commands or HTTP webhooks that fire at six lifecycle moments — before a tool call, after a tool call, when you submit a prompt, on session start, when the agent finishes, or on side-channel notifications (errors, iteration limit, approval-needed). They let you wire validation, auto-format, audit logging, or "block known-bad commands" logic into evva without forking the source.
+
+Hooks **compose** with the permission system: a `PreToolUse` hook runs *before* the permission gate and can override the gate's decision (allow / deny / ask) or mutate the tool's input before the gate sees it. Hooks are honored in every permission mode, including `bypass` — they are user-authored, so the bypass-mode "I know what I'm doing" stance does not apply.
+
+### Events
+
+| Event | When | Can block? | Payload extras |
+|---|---|---|---|
+| `SessionStart` | First `Run()` of an agent (incl. subagents) | No | `source` (`startup`), `model` |
+| `UserPromptSubmit` | Each user prompt, before it lands in the session | Yes — drops the prompt | `prompt` |
+| `PreToolUse` | Each tool call, before the permission gate | Yes; can also mutate input / override gate | `tool_name`, `tool_input`, `tool_use_id` |
+| `PostToolUse` | After the tool returns (success or error) | No — can append `additionalContext` only | `tool_name`, `tool_input`, `tool_response`, `is_error`, `tool_use_id` |
+| `Stop` | Main agent reaches a terminal turn (no more tool calls) | Yes — re-enters the loop once with a synthetic user message | `stop_hook_active`, `last_assistant_message` |
+| `Notification` | Iter-limit, errors, approval-needed | No (fire-and-forget) | `message`, `title`, `notification_type` |
+
+Every hook payload also carries a base envelope: `session_id`, `cwd`, `permission_mode`, `agent_id` / `agent_type` (subagents only), and `hook_event_name`.
+
+### Storage
+
+Hooks bind in JSON files, layered by scope:
+
+- `./.evva/settings.json` — **project** scope, in your repo.
+- `~/.evva/settings.json` — **user** scope, applies everywhere.
+
+Both files are read on every startup. Project hooks fire **before** user hooks for the same event, and a project hook returning `continue: false` short-circuits the user hook chain.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "write",
+        "hooks": [
+          { "type": "command", "command": "bash ~/.evva/hooks/validate-write.sh", "timeout": 5 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write|edit",
+        "hooks": [
+          { "type": "command", "command": "bash ~/.evva/hooks/gofmt-on-save.sh" }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "http", "url": "https://hooks.slack.com/services/...", "async": true }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `matcher` field is a tool-name glob (uses doublestar syntax). Empty matcher or omitted = matches all tools / all firings of that event.
+
+### Hook contract
+
+#### `type: "command"` (shell subprocess)
+
+evva invokes `/bin/sh -c "<command>"` with:
+- **stdin** — the event payload as JSON.
+- **env** — your current env plus `EVVA_PROJECT_DIR`, `EVVA_SESSION_ID`, `EVVA_AGENT_ID`.
+- **stdout** — optional JSON decision (parsed for PreToolUse / Stop / UserPromptSubmit / SessionStart; ignored for PostToolUse / Notification beyond `additionalContext`).
+- **exit codes**:
+  - `0` — success; stdout parsed as JSON.
+  - `1` — non-blocking error; logged, the hook chain continues.
+  - `2` — block (legacy/non-JSON shortcut); stderr is used as the block reason.
+
+The JSON decision shape:
+
+```json
+{
+  "continue": true,
+  "decision": "approve" | "block" | null,
+  "reason": "string",
+  "systemMessage": "string",
+  "hookSpecificOutput": {
+    "permissionDecision": "allow" | "deny" | "ask",
+    "permissionDecisionReason": "string",
+    "updatedInput": { ... },
+    "additionalContext": "string",
+    "initialUserMessage": "string"
+  }
+}
+```
+
+Per-event field semantics:
+
+- **PreToolUse**: `permissionDecision` overrides the gate. `updatedInput` replaces `tool_input` before the gate / tool runs. `additionalContext` is currently ignored for PreToolUse — append context via PostToolUse instead.
+- **PostToolUse**: only `additionalContext` matters. It's appended to the tool's result content for the LLM's next turn.
+- **UserPromptSubmit**: `additionalContext` is appended to the prompt. `decision: "block"` or `continue: false` drops the prompt entirely.
+- **SessionStart**: `initialUserMessage` is prepended to the session as a synthetic user message; `additionalContext` is appended to the first real prompt.
+- **Stop**: `decision: "block"` / `continue: false` re-enters the loop once, with `reason` as a synthetic user message. The re-entry pass sets `stop_hook_active: true` so a second block is ignored (prevents infinite loops).
+- **Notification**: stdout ignored — always fire-and-forget.
+
+#### `type: "http"` (HTTP webhook)
+
+evva sends an HTTP request with the JSON payload as body. Defaults to `POST`, `Content-Type: application/json`, 10-second timeout, and `async: true` (fire-and-forget). Non-2xx in sync mode is logged as a non-blocking error.
+
+```json
+{
+  "type": "http",
+  "url": "https://example.com/evva-hook",
+  "method": "POST",
+  "headers": { "Authorization": "Bearer xxx" },
+  "timeout": 5,
+  "async": true
+}
+```
+
+### Cookbook
+
+**Auto-format Go files on write.** Place at `~/.evva/hooks/gofmt-on-save.sh`:
+
+```bash
+#!/usr/bin/env bash
+path=$(jq -r '.tool_input.file_path' <&0 2>/dev/null)
+[[ "$path" == *.go ]] && gofmt -w "$path"
+exit 0
+```
+
+Then in `~/.evva/settings.json`:
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "write|edit", "hooks": [
+        { "type": "command", "command": "bash ~/.evva/hooks/gofmt-on-save.sh" }
+      ]}
+    ]
+  }
+}
+```
+
+**Block writes outside the repo root.** Place at `./.evva/hooks/sandbox-write.sh`:
+
+```bash
+#!/usr/bin/env bash
+path=$(jq -r '.tool_input.file_path' <&0)
+if [[ "$path" != "$EVVA_PROJECT_DIR"* ]]; then
+  cat <<EOF
+{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"write outside repo root"}}
+EOF
+fi
+exit 0
+```
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "write", "hooks": [
+        { "type": "command", "command": "bash ./.evva/hooks/sandbox-write.sh", "timeout": 2 }
+      ]}
+    ]
+  }
+}
+```
+
+**Slack ping on iteration-limit.** No shell needed:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      { "hooks": [
+        {
+          "type": "http",
+          "url": "https://hooks.slack.com/services/T0/B0/XXX",
+          "headers": { "Content-Type": "application/json" },
+          "async": true
+        }
+      ]}
+    ]
+  }
+}
+```
+
+### Disabling
+
+- `-no-hooks` CLI flag — skips loading entirely for one run (settings.json still on disk, just ignored).
+- Delete or move `settings.json` files — no hooks loaded.
+- Leave the `"hooks"` block empty — `{"hooks": {}}` is valid and produces no firings.
+
+Bad entries (invalid JSON, unknown event name, malformed URL, out-of-range timeout) are surfaced as warnings on stderr at startup and the rest of the file still loads.
 
 ---
 

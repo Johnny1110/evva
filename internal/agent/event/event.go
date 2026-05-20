@@ -60,6 +60,12 @@ const (
 	// arrives (or the context is cancelled).
 	KindApprovalNeeded Kind = "approval_needed"
 
+	// KindHookBlocked is emitted when a user-authored hook returns a
+	// "block" verdict (exit 2 from a shell hook, or decision:block /
+	// continue:false in stdout JSON). The TUI surfaces it as a transcript
+	// note so the user can see why their tool call didn't run.
+	KindHookBlocked Kind = "hook_blocked"
+
 	KindCompacting    Kind = "compacting"
 	KindCompactingEnd Kind = "compacting_end" // pair to KindCompacting; TUI removes the inflight block
 
@@ -96,6 +102,7 @@ type Event struct {
 	ToolUseStart   *ToolUseStartPayload   `json:",omitempty"`
 	ToolUseResult  *ToolUseResultPayload  `json:",omitempty"`
 	ApprovalNeeded *ApprovalNeededPayload `json:",omitempty"`
+	HookBlocked   *HookBlockedPayload   `json:",omitempty"`
 	Error         *ErrorPayload         `json:",omitempty"`
 	StoreUpdate   *StoreUpdatePayload   `json:",omitempty"`
 	Usage         *UsagePayload         `json:",omitempty"`
@@ -172,6 +179,17 @@ type ApprovalNeededPayload struct {
 	Reason    string
 	RiskHint  string
 	Matched   string
+}
+
+// HookBlockedPayload carries the context a hook needs to explain why a
+// tool was blocked. HookEvent identifies which lifecycle moment fired
+// (PreToolUse, Stop, UserPromptSubmit); ToolName / ToolID are empty for
+// non-tool events.
+type HookBlockedPayload struct {
+	HookEvent string
+	ToolName  string
+	ToolID    string
+	Reason    string
 }
 
 // ErrorPayload reports a Go-level failure that aborted the loop. Tool errors

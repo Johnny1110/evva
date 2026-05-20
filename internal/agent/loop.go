@@ -9,6 +9,7 @@ import (
 	"github.com/johnny1110/evva/internal/constant"
 
 	"github.com/johnny1110/evva/internal/agent/event"
+	"github.com/johnny1110/evva/internal/hooks"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/tools"
 )
@@ -48,7 +49,24 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 	}
 	defer a.running.Store(false)
 
-	a.session.Append(llm.Message{Role: llm.RoleUser, Content: prompt})
+	// SessionStart fires once per agent (firstRun CAS). It can prepend a
+	// synthetic initialUserMessage to the session and/or attach extra
+	// context to the user's first prompt. Subagents also fire — their
+	// agent_id is baked into the payload so hooks can filter on it.
+	if a.firstRun.CompareAndSwap(false, true) && a.hooksDispatcher != nil && a.hooksDispatcher.Has(hooks.EventSessionStart) {
+		init, extra, err := a.hooksDispatcher.FireSessionStart(ctx, "startup", a.Model())
+		if err != nil {
+			a.logger.Warn("hook.session_start.error", "err", err)
+		}
+		if init != "" {
+			a.session.Append(llm.Message{Role: llm.RoleUser, Content: init})
+		}
+		if extra != "" {
+			prompt = prompt + "\n\n[session_start context]\n" + extra
+		}
+	}
+
+	a.appendUserPrompt(ctx, prompt)
 	a.logger.Debug("run.start", "name", a.Name, "prompt_bytes", len(prompt),
 		"messages", len(a.session.Messages), "prompt", prompt)
 	return a.runLoop(ctx) // core agent loop.
@@ -134,7 +152,13 @@ func (a *Agent) runLoop(ctx context.Context) (string, error) {
 				"content_bytes", len(resp.Content),
 				"thinking_bytes", len(resp.Thinking),
 			)
-			return a.done(iter, resp), nil // break loop.
+			content, restart := a.done(ctx, iter, resp)
+			if restart {
+				// Stop hook blocked: a synthetic user message has been
+				// appended; re-enter the loop for one more iteration.
+				continue
+			}
+			return content, nil // break loop.
 		}
 
 		// Dispatch every tool call from this turn in parallel. Tool results
@@ -176,24 +200,51 @@ func (a *Agent) runLoop(ctx context.Context) (string, error) {
 	return "", a.limitBreak()
 }
 
-func (a *Agent) done(iter int, resp llm.Response) string {
+// done is the terminal transition for a Run. For subagents it flips to
+// READY_REPORT and posts to the parent's SpawnGroup. For the main agent
+// it consults Stop hooks: if one blocks (and we're not already on a
+// re-entry pass), it appends a synthetic user message and returns
+// restart=true so the loop runs one more iteration. Otherwise it emits
+// KindRunEnd and returns the final content.
+func (a *Agent) done(ctx context.Context, iter int, resp llm.Response) (string, bool) {
 	if a.IsSubagent() {
-		// subagent done -> ready to report.
 		a.status = constant.READY_REPORT
 		a.getParentSpawnGroup().Report(a.ID, resp.Content)
-	} else {
-		// main agent done -> idle.
-		a.status = constant.IDLE
-		a.emit(event.KindRunEnd, func(e *event.Event) {
-			e.RunEnd = &event.RunEndPayload{
-				Iters:    iter,
-				Content:  resp.Content,
-				Thinking: resp.Thinking,
-			}
-		})
+		return resp.Content, false
 	}
 
-	return resp.Content
+	if a.hooksDispatcher != nil && a.hooksDispatcher.Has(hooks.EventStop) {
+		blocked, reason, err := a.hooksDispatcher.FireStop(ctx, resp.Content, a.stopHookActive)
+		if err != nil {
+			a.logger.Warn("hook.stop.error", "err", err)
+		}
+		if blocked && !a.stopHookActive {
+			a.stopHookActive = true
+			a.logger.Info("hook.stop.blocked", "reason", reason)
+			a.emit(event.KindHookBlocked, func(e *event.Event) {
+				e.HookBlocked = &event.HookBlockedPayload{
+					HookEvent: "Stop",
+					Reason:    reason,
+				}
+			})
+			a.session.Append(llm.Message{
+				Role:    llm.RoleUser,
+				Content: "[Stop hook blocked stop] " + reason,
+			})
+			return resp.Content, true
+		}
+		a.stopHookActive = false
+	}
+
+	a.status = constant.IDLE
+	a.emit(event.KindRunEnd, func(e *event.Event) {
+		e.RunEnd = &event.RunEndPayload{
+			Iters:    iter,
+			Content:  resp.Content,
+			Thinking: resp.Thinking,
+		}
+	})
+	return resp.Content, false
 }
 
 // llmCall wraps llm.Complete (or Stream when the profile opts in) with

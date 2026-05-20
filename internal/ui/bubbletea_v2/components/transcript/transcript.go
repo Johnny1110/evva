@@ -458,6 +458,16 @@ func (t *Transcript) IngestEvent(e event.Event) bool {
 			t.blocks = append(t.blocks, newErrorBlock(e.Error.Stage, e.Error.Err.Error()))
 			return true
 		}
+	case event.KindHookBlocked:
+		if e.HookBlocked != nil {
+			t.resetInflight()
+			t.blocks = append(t.blocks, newHookBlockedBlock(
+				e.HookBlocked.HookEvent,
+				e.HookBlocked.ToolName,
+				e.HookBlocked.Reason,
+			))
+			return true
+		}
 	case event.KindRunCancelled:
 		t.resetInflight()
 		t.blocks = append(t.blocks, newCancelledBlock())

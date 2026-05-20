@@ -3,6 +3,7 @@ package agent
 import (
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"
+	"github.com/johnny1110/evva/internal/hooks"
 	"github.com/johnny1110/evva/internal/permission"
 	"github.com/johnny1110/evva/internal/tools/skill"
 )
@@ -99,6 +100,20 @@ func WithPermissionStore(s *permission.Store) Option {
 func WithPermissionBroker(b permission.Broker) Option {
 	return func(a *Agent) {
 		a.permissionBroker = b
+	}
+}
+
+// WithHooksRegistry installs the shared, process-wide hook registry. One
+// Registry per process, built in cmd/evva/main.go and threaded into the
+// root agent and every subagent. The per-agent Dispatcher is built from
+// this Registry inside New() so subagent-specific fields (agent_id,
+// agent_type) end up baked into payloads.
+//
+// nil disables hooks entirely (the agent's Hooks() returns nil and every
+// fire site sees a nil dispatcher, which is safe to call).
+func WithHooksRegistry(r *hooks.Registry) Option {
+	return func(a *Agent) {
+		a.hooksRegistry = r
 	}
 }
 

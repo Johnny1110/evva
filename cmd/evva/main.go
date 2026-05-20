@@ -17,6 +17,7 @@ import (
 	"github.com/johnny1110/evva/internal/agent"
 	"github.com/johnny1110/evva/internal/agent/event"
 	"github.com/johnny1110/evva/internal/agent/sysprompt"
+	"github.com/johnny1110/evva/internal/hooks"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/memdir"
 	"github.com/johnny1110/evva/internal/permission"
@@ -51,6 +52,7 @@ func main() {
 	noTUI := flag.Bool("no-tui", false, "disable the bubbletea TUI; read a prompt and run once with plain CLI output")
 	uiKind := flag.String("ui", "v2", "TUI implementation: v1 | v2 (v2 is in active development)")
 	permModeFlag := flag.String("permission-mode", "", "permission stance: default|accept_edits|plan|bypass (overrides YAML)")
+	hooksDisabled := flag.Bool("no-hooks", false, "disable all user-authored hooks for this run")
 	flag.Parse()
 
 	registry, _ := skill.LoadRegistry(cfg.EvvaHomeSkillsDir, cfg.WorkDirSkillsDir)
@@ -89,15 +91,27 @@ func main() {
 	permBroker := permission.NewBroker()
 	permMode := resolvePermissionMode(*permModeFlag, cfg.PermissionMode)
 
+	// Hooks: load project + user settings.json. -no-hooks short-circuits
+	// the load entirely so the user can disable hooks for one run without
+	// editing settings.json.
+	var hooksReg *hooks.Registry
+	if !*hooksDisabled {
+		var hookWarns []hooks.Warning
+		hooksReg, hookWarns = hooks.Load(cfg.WorkDir, cfg.EvvaHome)
+		for _, w := range hookWarns {
+			fmt.Fprintln(os.Stderr, "evva:", w.Error())
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	useTUI := !*noTUI && isTTY(os.Stdout)
 	if useTUI {
-		runTUI(ctx, prof, *maxIters, cfg.AppName, cfg.EvvaHome, registry, agentReg, permStore, permBroker, permMode, *uiKind)
+		runTUI(ctx, prof, *maxIters, cfg.AppName, cfg.EvvaHome, registry, agentReg, permStore, permBroker, permMode, hooksReg, *uiKind)
 		return
 	}
-	runCLI(ctx, prof, *maxIters, cfg.AppName, registry, agentReg, permStore, permBroker, permMode)
+	runCLI(ctx, prof, *maxIters, cfg.AppName, registry, agentReg, permStore, permBroker, permMode, hooksReg)
 }
 
 // resolvePermissionMode picks the active mode using CLI > YAML > "default"
@@ -140,7 +154,7 @@ func skillRefsFromRegistry(r *skill.Registry) []sysprompt.SkillRef {
 // or "v2" (clean-architecture rewrite, in active development). Both
 // satisfy the same ui.UI contract, so the agent-side wiring is
 // identical.
-func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHome string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode, kind string) {
+func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHome string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode, hooksReg *hooks.Registry, kind string) {
 	var tui ui.UI
 	switch kind {
 	default:
@@ -163,6 +177,7 @@ func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHom
 		agent.WithPermissionStore(permStore),
 		agent.WithPermissionBroker(permBroker),
 		agent.WithPermissionMode(permMode),
+		agent.WithHooksRegistry(hooksReg),
 	)
 	if err != nil {
 		exitf(1, "evva: %v", err)
@@ -202,13 +217,13 @@ func buildApprovalEvent(req permission.ApprovalRequest) event.Event {
 // Preserves the original behavior: read prompt → run → stream events as
 // plain text → exit. ErrIterLimit triggers a synchronous "press Enter to
 // continue" prompt on stderr.
-func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode) {
+func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode, hooksReg *hooks.Registry) {
 	prompt, err := readPrompt(flag.Args())
 	if err != nil {
 		exitf(2, "evva: %v", err)
 	}
 	if prompt == "" {
-		exitf(2, "usage: evva [-temp 0.7] [-max-tokens N] [-max-iters N] [-no-tui] [-permission-mode default|accept_edits|plan|bypass] <prompt>")
+		exitf(2, "usage: evva [-temp 0.7] [-max-tokens N] [-max-iters N] [-no-tui] [-permission-mode default|accept_edits|plan|bypass] [-no-hooks] <prompt>")
 	}
 
 	// CLI mode has no interactive approval surface — every Ask becomes a
@@ -231,6 +246,7 @@ func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, 
 		agent.WithPermissionStore(permStore),
 		agent.WithPermissionBroker(permBroker),
 		agent.WithPermissionMode(permMode),
+		agent.WithHooksRegistry(hooksReg),
 	)
 	if err != nil {
 		exitf(1, "evva: %v", err)
@@ -311,6 +327,16 @@ func (s cliSink) Emit(e event.Event) {
 	case event.KindError:
 		if e.Error != nil {
 			fmt.Fprintf(s.out, "\n[error:%s] %v\n", e.Error.Stage, e.Error.Err)
+		}
+	case event.KindHookBlocked:
+		if e.HookBlocked != nil {
+			if e.HookBlocked.ToolName != "" {
+				fmt.Fprintf(s.out, "\n[hook:blocked] %s → %s: %s\n",
+					e.HookBlocked.HookEvent, e.HookBlocked.ToolName, e.HookBlocked.Reason)
+			} else {
+				fmt.Fprintf(s.out, "\n[hook:blocked] %s: %s\n",
+					e.HookBlocked.HookEvent, e.HookBlocked.Reason)
+			}
 		}
 	case event.KindIterLimit:
 		if e.IterLimit != nil {

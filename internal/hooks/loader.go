@@ -138,7 +138,7 @@ func normalizeMatcher(path, evName string, idx int, ms matcherShape) (Config, []
 	}
 
 	for j, hs := range ms.Hooks {
-		cmd, herr := normalizeCommand(evName, hs)
+		cmd, herr := normalizeCommand(hs)
 		if herr != nil {
 			warns = append(warns, Warning{
 				Path: path,
@@ -151,7 +151,7 @@ func normalizeMatcher(path, evName string, idx int, ms matcherShape) (Config, []
 	return cfg, warns
 }
 
-func normalizeCommand(evName string, hs commandShape) (Command, error) {
+func normalizeCommand(hs commandShape) (Command, error) {
 	t := CommandType(strings.ToLower(hs.Type))
 	cmd := Command{
 		Type:    t,

@@ -12,6 +12,7 @@ import (
 
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"
+	"github.com/johnny1110/evva/internal/hooks"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/llmfactory"
 	"github.com/johnny1110/evva/internal/logger"
@@ -85,6 +86,23 @@ type Agent struct {
 	// inherited by every subagent.
 	permissionStore  *permission.Store
 	permissionBroker permission.Broker
+
+	// hooksRegistry is the shared, process-wide registry of user-authored
+	// lifecycle hooks (SessionStart, PreToolUse, PostToolUse, etc.). One
+	// Registry built in cmd/evva/main.go and inherited by every subagent
+	// via WithHooksRegistry. nil = hooks disabled.
+	//
+	// hooksDispatcher is the per-agent dispatcher built from hooksRegistry.
+	// Each agent gets its own so agent_id / agent_type baked into the base
+	// payload reflect the firing agent, not the root.
+	hooksRegistry   *hooks.Registry
+	hooksDispatcher *hooks.Dispatcher
+	// firstRun gates the SessionStart fire site so it only fires on the
+	// agent's first Run, not every iteration boundary.
+	firstRun atomic.Bool
+	// stopHookActive is set true on a Stop hook re-entry pass so the same
+	// hook cannot block a second time (prevents infinite loops).
+	stopHookActive bool
 
 	sink event.Sink // event to ui
 
@@ -171,6 +189,13 @@ func New(parent *Agent, profile Profile, opts ...Option) (*Agent, error) {
 	// adapt options params (e.g. name, sink, maxIters..)
 	for _, opt := range opts {
 		opt(a)
+	}
+
+	// Build the per-agent hook dispatcher once options have populated the
+	// shared registry pointer. The dispatcher is nil-safe if hooksRegistry
+	// is nil — callers don't need to nil-guard at fire sites.
+	if a.hooksRegistry != nil {
+		a.hooksDispatcher = hooks.NewDispatcher(a.hooksRegistry, lgr, a.hookBase, cfg.WorkDir)
 	}
 
 	// Single subscription bridges every store registered on the ToolState
@@ -382,6 +407,30 @@ func (a *Agent) RespondPermission(id string, dec ui.PermissionDecision) error {
 		}
 	}
 	return a.permissionBroker.Respond(id, pd)
+}
+
+// HooksRegistry exposes the shared hook registry. Returns nil when no
+// hooks were installed (tests, -no-hooks flag).
+func (a *Agent) HooksRegistry() *hooks.Registry { return a.hooksRegistry }
+
+// Hooks returns the agent's hook dispatcher. nil-safe — the dispatcher's
+// Fire methods all noop on nil so the agent loop can call them unconditionally.
+func (a *Agent) Hooks() *hooks.Dispatcher { return a.hooksDispatcher }
+
+// hookBase builds a fresh BasePayload for the hook dispatcher. Called per
+// fire so live fields (permission mode) reflect current state.
+func (a *Agent) hookBase() hooks.BasePayload {
+	cfg := config.Get()
+	base := hooks.BasePayload{
+		SessionID:      a.ID,
+		Cwd:            cfg.WorkDir,
+		PermissionMode: string(a.PermissionMode()),
+	}
+	if a.IsSubagent() {
+		base.AgentID = a.ID
+		base.AgentType = a.profile.Type.String()
+	}
+	return base
 }
 
 // Sink returns the agent's event sink. Used by the AGENT tool to wrap with

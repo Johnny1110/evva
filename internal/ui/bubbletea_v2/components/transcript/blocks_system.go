@@ -249,6 +249,40 @@ func (b *ErrorBlock) Render(ctx RenderContext) string {
 }
 
 // ============================================================================
+// HookBlockedBlock — KindHookBlocked one-liner.
+// ============================================================================
+
+type HookBlockedBlock struct {
+	id       uint64
+	rev      uint64
+	hookEv   string
+	toolName string
+	reason   string
+}
+
+func newHookBlockedBlock(hookEv, toolName, reason string) *HookBlockedBlock {
+	return &HookBlockedBlock{id: allocID(), rev: 1, hookEv: hookEv, toolName: toolName, reason: reason}
+}
+
+func (b *HookBlockedBlock) ID() uint64  { return b.id }
+func (b *HookBlockedBlock) Rev() uint64 { return b.rev }
+func (b *HookBlockedBlock) Kind() Kind  { return KindError }
+
+func (b *HookBlockedBlock) plain() string {
+	if b.toolName != "" {
+		return fmt.Sprintf("⛨ [hook:%s] %s — %s", b.hookEv, b.toolName, b.reason)
+	}
+	return fmt.Sprintf("⛨ [hook:%s] %s", b.hookEv, b.reason)
+}
+
+func (b *HookBlockedBlock) PlainText() string { return b.plain() }
+
+func (b *HookBlockedBlock) Render(ctx RenderContext) string {
+	styled := ctx.Theme.ErrorBanner.Render(b.plain())
+	return applyLineGutter(styled, ctx.Width, ctx.Theme, ctx.Opts.Focused, len(ctx.Opts.Highlights) > 0)
+}
+
+// ============================================================================
 // SystemBlock — generic chrome rows (draining, cancelled, iter-limit).
 // ============================================================================
 

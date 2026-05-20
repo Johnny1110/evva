@@ -61,6 +61,7 @@ func (a *Agent) Spawn(ctx context.Context, req meta.SpawnRequest) (string, error
 		WithPermissionMode(a.PermissionMode()),
 		WithPermissionStore(a.permissionStore),
 		WithPermissionBroker(a.permissionBroker),
+		WithHooksRegistry(a.hooksRegistry),
 	)
 	if err != nil {
 		return "", fmt.Errorf("spawn: new agent: %w", err)

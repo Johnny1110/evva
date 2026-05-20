@@ -12,9 +12,11 @@ import (
 
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"
+	"github.com/johnny1110/evva/internal/agent/sysprompt"
 	"github.com/johnny1110/evva/internal/llm"
 	"github.com/johnny1110/evva/internal/llmfactory"
 	"github.com/johnny1110/evva/internal/logger"
+	"github.com/johnny1110/evva/internal/memdir"
 	"github.com/johnny1110/evva/internal/permission"
 	"github.com/johnny1110/evva/internal/session"
 	"github.com/johnny1110/evva/internal/tools"
@@ -67,10 +69,27 @@ type Agent struct {
 	exposeTools       []tools.Tool // this is used for the llm call params(sys prompt) only.
 
 	// agentRegistry is the merged catalog of built-in + disk-loaded agent
-	// definitions. Subagent spawning routes through it; Phase 6 will also
-	// drive the /profile picker off of it. Subagents inherit the parent's
-	// registry via WithAgentRegistry on agent.New.
+	// definitions. Subagent spawning routes through it; the /profile picker
+	// drives off of it. Subagents inherit the parent's registry via
+	// WithAgentRegistry on agent.New.
 	agentRegistry *AgentRegistry
+
+	// activePersona is the current persona's wire name ("evva" / "nono" /
+	// ...). Set at construction from profile-resolution; mutated by
+	// SwitchProfile. Surfaced through ProfileName() so the TUI status bar
+	// can render the active persona dynamically.
+	activePersona string
+
+	// skillRefs is the snapshot the host passed in at construction. Stashed
+	// so SwitchProfile can rebuild the profile with the same skill catalog
+	// without re-walking the disk.
+	skillRefs []sysprompt.SkillRef
+
+	// memSnap is the EVVA.md + USER_PROFILE.md snapshot threaded in at
+	// construction. Reused by SwitchProfile when rebuilding the system
+	// prompt for a new persona (the snapshot itself is stable for the
+	// lifetime of the process).
+	memSnap memdir.Snapshot
 
 	// permissionMode is the active stance the gate enforces. Subagents
 	// inherit the parent's mode (CLAUDE.md). Set via WithPermissionMode at
@@ -243,6 +262,93 @@ func (a *Agent) SetEffort(level string) error {
 	return config.Get().SetDefaultEffort(level)
 }
 
+// SwitchProfile rebuilds the agent for a new persona — different system
+// prompt, different active/deferred tool lists, fresh session. Mirrors
+// SwitchLLM's running-guard discipline.
+//
+// The toolState is preserved so observable subscriptions (the TUI
+// panels) keep working across the swap; only the TodoStore is cleared
+// since its entries belong to a single session. The LLM client is
+// rebuilt because the new profile carries its own WithSystem option.
+//
+// MUST be called while no Run is in flight. Returns ErrRunInProgress
+// when the running guard is set. Persists the new persona name to
+// evva-config.yml so the next launch boots into it.
+func (a *Agent) SwitchProfile(name string) error {
+	if a.IsSubagent() {
+		return fmt.Errorf("agent: only the root agent can switch profile")
+	}
+	if a.running.Load() {
+		return ErrRunInProgress
+	}
+	if name == "" {
+		return fmt.Errorf("agent: profile name is required")
+	}
+
+	cfg := config.Get()
+	newProfile, err := ResolveMainProfile(cfg, a.agentRegistry, name, a.skillRefs, a.memSnap, baseLLMOptions(a.profile.LLMOptions))
+	if err != nil {
+		return err
+	}
+
+	// Rebuild the active-tool map from the new profile. Reuses the
+	// existing toolState so observers (UI panels) keep their subscriptions.
+	exposeTools, err := toolset.Build(newProfile.ActiveTools, a.toolState)
+	if err != nil {
+		return fmt.Errorf("agent: build active tools: %w", err)
+	}
+	active := make(map[string]tools.Tool, len(exposeTools))
+	for _, t := range exposeTools {
+		active[t.Name()] = t
+	}
+	deferred := make(map[tools.ToolName]struct{}, len(newProfile.DeferredTools))
+	for _, n := range newProfile.DeferredTools {
+		deferred[n] = struct{}{}
+	}
+
+	effortOpts := append(newProfile.LLMOptions, llm.WithEffort(llm.ParseEffort(a.effort)))
+	client, err := llmfactory.Of(newProfile.LLMProvider, newProfile.LLMModel, effortOpts)
+	if err != nil {
+		return fmt.Errorf("agent: build llm client: %w", err)
+	}
+
+	a.profile = newProfile
+	a.active = active
+	a.deferredAllowlist = deferred
+	a.exposeTools = exposeTools
+	a.llm = client
+	a.session = session.New()
+	a.activePersona = name
+	a.toolState.TodoStore().Clear()
+
+	a.logger.Info("agent: profile switched", "persona", name, "provider", client.Name(), "model", client.Model())
+	return cfg.SetDefaultProfile(name)
+}
+
+// baseLLMOptions strips any prior WithSystem entries from opts so
+// ResolveMainProfile's freshly-appended WithSystem is the only one in
+// play. The current profile's options carry the *previous* persona's
+// system prompt — re-using them without filtering would let the old
+// prompt clobber the new one when llm.Apply runs the options in order.
+func baseLLMOptions(opts []llm.Option) []llm.Option {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]llm.Option, 0, len(opts))
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		var probe llm.LLMParams
+		opt(&probe)
+		if probe.System != "" {
+			continue
+		}
+		out = append(out, opt)
+	}
+	return out
+}
+
 // SwitchLLM rebuilds a.llm with a new (provider, model) pair, updates
 // a.profile so subagents inherit the new provider, and clears the
 // session — provider-specific in-flight state (Anthropic
@@ -300,6 +406,46 @@ func (a *Agent) Logger() *slog.Logger { return a.logger }
 
 // Profile returns the profile this agent was constructed with.
 func (a *Agent) Profile() Profile { return a.profile }
+
+// ProfileName returns the active persona's wire name ("evva", "nono", ...).
+// Used by the TUI status bar and the /profile picker's current-row marker.
+// Subagents return the persona kind they were constructed under.
+func (a *Agent) ProfileName() string { return a.activePersona }
+
+// ListMainProfiles enumerates the personas the /profile picker can
+// switch to. Pulls from the registry's ListMain(); subagents return nil
+// (they don't drive the picker).
+func (a *Agent) ListMainProfiles() []ui.ProfileChoice {
+	if a.IsSubagent() || a.agentRegistry == nil {
+		return nil
+	}
+	defs := a.agentRegistry.ListMain()
+	out := make([]ui.ProfileChoice, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, ui.ProfileChoice{Name: d.Name, WhenToUse: d.WhenToUse})
+	}
+	return out
+}
+
+// SubagentTypes returns the agent names that the AGENT tool's
+// subagent_type enum should accept. Pulls from the registry's
+// ListSubagent (so disk subagents become wire-callable as soon as the
+// registry sees them). Falls back to the built-in pair when no
+// registry is installed.
+func (a *Agent) SubagentTypes() []string {
+	if a.agentRegistry == nil {
+		return []string{"explore", "general-purpose"}
+	}
+	defs := a.agentRegistry.ListSubagent()
+	if len(defs) == 0 {
+		return []string{"explore", "general-purpose"}
+	}
+	out := make([]string, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, d.Name)
+	}
+	return out
+}
 
 // Model returns the model id the agent's LLM client is bound to.
 // Wraps llm.Client.Model() so the ui.Controller interface stays

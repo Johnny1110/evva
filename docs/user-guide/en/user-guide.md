@@ -6,6 +6,8 @@
 - [2. Slash Commands](#2-slash-commands)
   - [/config — Runtime Settings](#config--runtime-settings)
   - [/model — Switch Provider/Model](#model--switch-providermodel)
+  - [/profile — Switch Persona](#profile--switch-persona)
+  - [/effort — Thinking Effort](#effort--thinking-effort)
 - [3. Keybindings](#3-keybindings)
 - [4. Yank Mode — Copying from the Transcript](#4-yank-mode--copying-from-the-transcript)
 - [5. Transcript Search](#5-transcript-search)
@@ -13,13 +15,18 @@
   - [Permission Modes](#permission-modes)
   - [Approval Prompts](#approval-prompts)
   - [Permission Rules](#permission-rules)
-- [7. Sub-agents](#7-sub-agents)
-- [8. Configuration Reference](#8-configuration-reference)
+- [7. Sub-agents and Personas](#7-sub-agents-and-personas)
+- [8. Hooks](#8-hooks)
+  - [Where Hooks Live](#where-hooks-live)
+  - [File Shape](#file-shape)
+  - [Events](#events)
+  - [Payload and Decision](#payload-and-decision)
+- [9. Configuration Reference](#9-configuration-reference)
   - [evva-config.yml](#evva-configyml)
   - [.env](#env-optional)
   - [CLI Flags](#cli-flags)
-- [9. Modes — TUI vs CLI](#9-modes--tui-vs-cli)
-- [10. Logs](#10-logs)
+- [10. Modes — TUI vs CLI](#10-modes--tui-vs-cli)
+- [11. Logs](#11-logs)
 
 ---
 
@@ -33,20 +40,20 @@
 │  assistant text…                                             │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│ ▰ TASKS         (only when non-empty)                        │
+│ ▰ TODOS         (only when non-empty)                        │
 │   ▶ wire migration                                           │
 ├──────────────────────────────────────────────────────────────┤
 │ ‹⠹ explorer› ‹▶ writer› ‹✔ reviewer›   ← active sub-agents   │
 ├──────────────────────────────────────────────────────────────┤
-│ overlay panels: /config · /model · approval · suggestions    │
+│ overlay panels: /config · /model · /profile · approval · …   │
 ├──────────────────────────────────────────────────────────────┤
 │ > input                                                      │
 ├──────────────────────────────────────────────────────────────┤
-│ ‹⠋ RUN› ◆ evva ◆ ▸ model ◆ in N out M ◆ CTX ▰▰▱…▱ 12%       │
+│ ‹⠋ RUN› ◆ EVVA ◆ ▸ model ◆ in N out M ◆ CTX ▰▰▱…▱ 12%       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Panels collapse to zero height when empty. The status bar is always visible at the bottom.
+Panels collapse to zero height when empty. The status bar is always visible at the bottom; the `EVVA` cell shows the active persona name uppercased — it changes to `NONO`, `MY-PERSONA`, etc. after a `/profile` switch.
 
 ---
 
@@ -67,8 +74,13 @@ Available commands:
 | --- | --- |
 | `/config` | open the settings form |
 | `/model` | switch LLM provider / model — **clears conversation history** |
+| `/profile` | switch agent persona (evva, nono, …) — **clears conversation history** |
+| `/effort` | set thinking effort (low / medium / high / ultra) |
+| `/compact` | compact the transcript — pick micro or full |
 | `/clear` | clear the transcript (keeps the banner) |
 | `/exit`, `/quit` | quit |
+
+User-installed skills appear here too — anything you've dropped in `~/.evva/skills/<name>/SKILL.md` or `<workdir>/.evva/skills/<name>/SKILL.md` shows up as `/<name>` in the same panel.
 
 ### /config — Runtime Settings
 
@@ -138,6 +150,59 @@ Opens a flat list of every `(provider, model)` pair the binary knows about, curs
 **Important:** switching always clears the session. Anthropic's `ThinkingSignature` is provider-locked — carrying old history across a swap would 400 on the next request. The new choice is also persisted as `default_provider` + `default_model` so your next launch starts there.
 
 Switching is refused if a run is in flight; press Esc first to cancel, then `/model` again.
+
+### /profile — Switch Persona
+
+Switches the agent's persona — different identity, system prompt, and tool surface. Built-in `evva` (the full-kit software-engineer persona) ships with the binary; you can add more by dropping an `agents/<name>/` directory under `~/.evva/`:
+
+```
+~/.evva/agents/nono/
+├── system_prompt.md   # the persona body (required)
+├── tools.yml          # { active: [...], deferred: [...] }
+└── meta.yml           # { as: [main|subagent|both], when_to_use, inject_memory, advertise_skills }
+```
+
+`meta.yml` keys:
+
+| key | meaning |
+| --- | --- |
+| `as` | one of `[main]`, `[subagent]`, or `[main, subagent]`. `main` makes it appear in `/profile`; `subagent` makes it callable via the Agent tool's `subagent_type` enum |
+| `when_to_use` | one-sentence blurb the picker shows next to the name |
+| `inject_memory` | when `true`, the persona receives the `EVVA.md` + `USER_PROFILE.md` snapshot in its system prompt. Default `false` |
+| `advertise_skills` | when `true`, the persona's prompt advertises the installed skill catalog. Default `false` |
+
+The picker lists every persona with `as:` containing `main`:
+
+```
+┌─ /PROFILE ───────────────────────────────────────────────────┐
+│ Switching clears the conversation — each persona has its own │
+│ system prompt and tool surface.                              │
+│                                                              │
+│ ▶ evva  (current)  — full-kit software-engineer              │
+│   nono             — finance / numbers persona               │
+│                                                              │
+│ [↑↓] navigate · [Enter] switch · [Esc] cancel                │
+└──────────────────────────────────────────────────────────────┘
+```
+
+On switch the transcript clears, the status-bar label updates to the new persona's uppercased name, and the new persona is persisted as `default_profile` so next launch boots into it.
+
+A persona declared `as: [main, subagent]` is **also** callable from the running root agent via the Agent tool — that's the cross-persona delegation path (e.g. `evva` asking `nono` a finance question without leaving the session).
+
+Switching is refused if a run is in flight; press Esc first to cancel, then `/profile` again.
+
+### /effort — Thinking Effort
+
+Adjusts the model's reasoning depth. Four tiers:
+
+| tier | use when |
+| --- | --- |
+| `low` | quick lookups, "what's the syntax for X" |
+| `medium` | default — most coding tasks |
+| `high` | non-trivial reasoning, multi-step refactors |
+| `ultra` | architectural calls, subtle bug hunts |
+
+Each provider maps these onto its own knob — Anthropic effort levels, DeepSeek thinking on/off + tier, OpenAI reasoning effort, etc. Providers with only a coarse on/off switch map `low` → off and the rest → on. The chosen tier persists as `default_effort` and is shown in the status bar (`▸ model · ⚡high`).
 
 ---
 
@@ -221,7 +286,7 @@ evva gates every tool call through a **permission mode**. Four modes, cycled wit
 
 | mode | auto-allowed without asking | best for |
 | --- | --- | --- |
-| **`default`** | Read-only tools (`read`, `tree`, `grep`, `glob`, `web_*`, `json_query`, `calc`), agent self-coordination (`agent`, `task_*`, `skill`, `tool_search`, `ask_user_question`), and **read-only bash commands** (`ls`, `cat`, `head`, `grep`, `git status`, `git log`, …). File writes and any other bash command **ask**. | Beginners, sensitive work, default stance |
+| **`default`** | Read-only tools (`read`, `tree`, `grep`, `glob`, `web_*`, `json_query`, `calc`), agent self-coordination (`agent`, `todo_write`, `skill`, `tool_search`, `ask_user_question`), and **read-only bash commands** (`ls`, `cat`, `head`, `grep`, `git status`, `git log`, …). File writes and any other bash command **ask**. | Beginners, sensitive work, default stance |
 | **`accept_edits`** | Same as `default` + file edits (`edit`, `write`, `notebook_edit`) + common filesystem bash commands (`mkdir`, `touch`, `mv`, `cp`, `rmdir`, `ln`, `chmod`, `chown`). | Iterating on code under review |
 | **`plan`** | Same read-only safelist as `default`. Anything outside that set is **denied outright** (no prompt). | Exploring a codebase before deciding what to change |
 | **`bypass`** | Everything. Dangerous-command classification still logs in the background, but never blocks. | **Isolated containers and VMs only** — propagates to subagents |
@@ -330,15 +395,155 @@ Source priority within each behavior (deny/ask/allow) is `session > project > us
 
 ---
 
-## 7. Sub-agents
+## 7. Sub-agents and Personas
 
-The root agent can spawn sub-agents (`explore` for read-only inspection, `general-purpose` for write-capable). Active sub-agents appear as chips in a horizontal strip above the input. Async sub-agents finish in the background — their summaries land as a synthetic user message at the top of the next iteration, so the conversation picks them up automatically.
+The root agent can spawn sub-agents. Two flavors are built in:
 
-You don't drive sub-agents yourself; the model decides when to spawn one. Two-layer hierarchy by design (sub-agents can't spawn sub-agents).
+- **`explore`** — read-only inspection. Tools are limited to `read`, `grep`, `tree`, `glob`, `web_search`, `json_query`. The model uses this for "where is X defined / which files reference Y" lookups without risk of mutation.
+- **`general-purpose`** — write-capable. Carries the fs + shell + web + util tool surface.
+
+Active sub-agents appear as chips in a horizontal strip above the input. Async sub-agents finish in the background — their summaries land as a synthetic user message at the top of the next iteration, so the conversation picks them up automatically. The hierarchy is exactly two layers deep: sub-agents can't spawn sub-agents.
+
+**User-authored sub-agents.** Drop an `agents/<name>/` directory under `~/.evva/` (same layout as `/profile` — see above) with `as: [subagent]` in `meta.yml`. The disk-loaded agent automatically appears in the Agent tool's `subagent_type` enum without restart-on-recompile.
+
+**Cross-persona delegation.** A persona declared `as: [main, subagent]` is both selectable at `/profile` and callable from the running root agent. That's how the built-in `evva` ends up able to delegate a finance question to a user-authored `nono` persona — the root invokes the Agent tool with `subagent_type: "nono"`, the spawner builds a child agent under `nono`'s system prompt + tools, runs it once, and surfaces the summary back into evva's transcript.
+
+You don't drive sub-agents yourself; the model decides when to spawn one.
 
 ---
 
-## 8. Configuration Reference
+## 8. Hooks
+
+Hooks are user-authored shell commands or HTTP webhooks that fire at six well-defined points in the agent loop. Use them for: validation before tool calls, auto-formatting after edits, custom logging, blocking known-bad commands, or piping notifications to Slack / a desktop notifier on long-running approvals.
+
+### Where Hooks Live
+
+Two files, both optional, merged at startup:
+
+- `<workdir>/.evva/settings.json` — **project** hooks. Lives with the repo; share via git if you want.
+- `~/.evva/settings.json` — **user** hooks. Apply in every working directory.
+
+Project hooks fire first; a project hook that returns `"continue": false` short-circuits the user hooks for that fire. Malformed entries become warnings on stderr at startup — the rest of the file still loads.
+
+### File Shape
+
+JSON layout (compatible with Claude Code's `settings.json` `hooks` block, so files written for either tool load in the other unchanged):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          { "type": "command", "command": "/path/to/check.sh", "timeout": 30 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "edit|write",
+        "hooks": [
+          { "type": "command", "command": "goimports -w \"$EVVA_TOOL_INPUT_PATH\"" }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "http", "url": "https://hooks.slack.com/...", "method": "POST", "async": true }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Matcher**: doublestar glob against the tool name. Empty matcher = match all. Supports alternation (`bash|grep`) and wildcards (`tool_*`). Events that don't carry a tool name (SessionStart, Stop, Notification) ignore the matcher.
+
+**Hook entry fields**:
+
+| field | applies to | meaning |
+| --- | --- | --- |
+| `type` | both | `"command"` (shell subprocess) or `"http"` (HTTP request) |
+| `command` | command | shell command. Stdin is the JSON payload; stdout is the optional decision |
+| `url` | http | endpoint to POST the payload to |
+| `method` | http | HTTP method, default `POST` |
+| `headers` | http | optional headers map |
+| `timeout` | both | seconds (1–600). Default per-event |
+| `async` | both | fire-and-forget. Default `false` for command, `true` for http |
+
+Subprocess hooks receive `EVVA_PROJECT_DIR` in their environment.
+
+### Events
+
+| event | fires | typical use |
+| --- | --- | --- |
+| `SessionStart` | once at agent boot | warm caches, inject extra context into the first prompt |
+| `UserPromptSubmit` | before each user prompt is appended to the session | prompt validation, secret redaction |
+| `PreToolUse` | before the permission gate runs | block bad calls, mutate args, override the gate |
+| `PostToolUse` | after a tool returns | auto-format, persist logs, append context for the next turn |
+| `Stop` | when the main agent reaches a terminal turn (no more tool calls) | summary export, audit logging |
+| `Notification` | iteration limit, internal errors, approval-needed | Slack ping, desktop notify on long-running approvals |
+
+### Payload and Decision
+
+Every hook receives a JSON payload (on stdin for commands, as the HTTP body for webhooks). Common envelope:
+
+```json
+{
+  "session_id": "...",
+  "transcript_path": "...",
+  "cwd": "/abs/working/dir",
+  "permission_mode": "default",
+  "agent_id": "uuid",
+  "agent_type": "main",
+  "hook_event_name": "PreToolUse"
+}
+```
+
+Event-specific fields:
+
+- `SessionStart`: `source` (`"startup"`), `model`
+- `UserPromptSubmit`: `prompt`
+- `PreToolUse`: `tool_name`, `tool_input` (raw JSON the model emitted), `tool_use_id`
+- `PostToolUse`: `tool_name`, `tool_input`, `tool_use_id`, `tool_response`, `is_error`
+- `Stop`: `last_assistant_message`, `stop_hook_active`
+- `Notification`: `message`, `title`, `notification_type`
+
+A command hook can write a JSON object to stdout to influence the loop:
+
+```json
+{
+  "continue": false,
+  "decision": "block",
+  "reason": "lint failed: see stderr",
+  "systemMessage": "ran golint, found 3 issues",
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "vendor directory is read-only",
+    "additionalContext": "the next turn should retry the edit elsewhere",
+    "updatedInput": { "file_path": "/safer/path.go" }
+  }
+}
+```
+
+Effect by event:
+
+- **PreToolUse**: `hookSpecificOutput.permissionDecision` (`"allow"` / `"deny"` / `"ask"`) overrides the gate. `updatedInput` mutates the tool's args before the gate runs. `decision: "block"` or `continue: false` blocks the call outright with the given `reason`.
+- **PostToolUse**: `additionalContext` is appended to the tool result the LLM sees next turn. `block` / `continue` are ignored — post-tool hooks can't unsend a tool.
+- **UserPromptSubmit**: `additionalContext` is appended to the user prompt. `block` / `continue: false` drops the prompt entirely.
+- **Stop**: `block` / `continue: false` re-enters the loop once (the `stop_hook_active` flag prevents infinite re-entry).
+- **SessionStart**: `additionalContext` and `hookSpecificOutput.initialUserMessage` are prepended to the first user prompt.
+- **Notification**: stdout is ignored — purely a side-channel signal.
+
+A hook with empty stdout (or non-JSON output) means "no opinion, pass through." Exit code 2 from a command hook is interpreted as a hard block with the message read from stderr.
+
+Subprocesses exceeding `timeout` are killed; their decisions are discarded. HTTP hooks default to async fire-and-forget — failures are logged but never block the loop.
+
+---
+
+## 9. Configuration Reference
 
 ### evva-config.yml
 
@@ -354,6 +559,14 @@ display_thinking: true
 # Default model used at startup (overwritten by /model swap)
 default_provider: deepseek
 default_model: deepseek-v4-pro
+
+# Default thinking effort: low | medium | high | ultra. Overwritten by /effort.
+default_effort: medium
+
+# Default persona that boots — must match an agent name in the registry
+# (built-in "evva" or a user-authored agent under ~/.evva/agents/<name>/).
+# Overwritten by /profile. Empty falls back to "evva".
+default_profile: evva
 
 # Permission stance at startup. Cycle at runtime with Shift+Tab; -permission-mode CLI flag overrides.
 permission_mode: default     # default | accept_edits | plan | bypass
@@ -398,7 +611,7 @@ echo "list files in /tmp" | evva -no-tui   # piped prompt
 
 ---
 
-## 9. Modes — TUI vs CLI
+## 10. Modes — TUI vs CLI
 
 **Interactive TUI** (default when stdout is a TTY). Transcript, panels, status bar, the works.
 
@@ -406,6 +619,6 @@ echo "list files in /tmp" | evva -no-tui   # piped prompt
 
 ---
 
-## 10. Logs
+## 11. Logs
 
 Per-agent JSON logs land under `log/<agent-id>/<agent-id>.log` by default. Set `LOG_DIR` in `.env` to redirect, or leave it unset to also stream to stdout. `LOG_LEVEL=debug` exposes every iteration's `turn.start` / `llm.call` / `tool.dispatch` / `tool.result` lines — handy when debugging an agent that's stuck or looping.

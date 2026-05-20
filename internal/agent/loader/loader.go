@@ -120,8 +120,8 @@ func loadOne(root, name string) (*sysprompt.AgentDefinition, []Warning) {
 	def := &sysprompt.AgentDefinition{
 		Name:            name,
 		WhenToUse:       metaCfg.WhenToUse,
-		OmitMemory:      true, // disk agents are subagents by default; Phase 6 may revisit for main-tier disk personas
-		AdvertiseSkills: false,
+		OmitMemory:      !metaCfg.InjectMemory,
+		AdvertiseSkills: metaCfg.AdvertiseSkills,
 		BuildSystemPrompt: func(promptBody string) func(sysprompt.PromptContext) string {
 			body := promptBody // capture by value so future iterations don't alias
 			return func(_ sysprompt.PromptContext) string { return body }

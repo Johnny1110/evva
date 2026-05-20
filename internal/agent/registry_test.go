@@ -14,7 +14,7 @@ func TestAgentRegistry_BuiltInsAlwaysPresent(t *testing.T) {
 	if len(warns) != 0 {
 		t.Errorf("unexpected warnings: %v", warns)
 	}
-	for _, name := range []string{"main", "explore", "general-purpose"} {
+	for _, name := range []string{"evva", "explore", "general-purpose"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected built-in %q to be present", name)
 		}
@@ -35,8 +35,8 @@ func TestAgentRegistry_ListMainAndSubagent(t *testing.T) {
 	r, _ := BuildAgentRegistry("")
 
 	mains := r.ListMain()
-	if len(mains) != 1 || mains[0].Name != "main" {
-		t.Errorf("ListMain: expected only 'main', got %v", agentNames(mains))
+	if len(mains) != 1 || mains[0].Name != "evva" {
+		t.Errorf("ListMain: expected only 'evva', got %v", agentNames(mains))
 	}
 
 	subs := r.ListSubagent()
@@ -133,7 +133,7 @@ func TestAgentRegistry_MalformedDiskAgentDoesNotBreakRegistry(t *testing.T) {
 		t.Fatal("expected a warning for the broken disk agent")
 	}
 	// Built-ins still present.
-	for _, name := range []string{"main", "explore", "general-purpose"} {
+	for _, name := range []string{"evva", "explore", "general-purpose"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("built-in %q missing after broken disk-agent load", name)
 		}

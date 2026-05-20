@@ -43,6 +43,13 @@ type SubagentSpawner interface {
 	// Spawn creates a subagent per the request, runs it, and returns the
 	// child's final assistant text on success.
 	Spawn(ctx context.Context, req SpawnRequest) (string, error)
+
+	// SubagentTypes returns the sorted list of agent names that may appear
+	// as the AGENT tool's subagent_type value. The agent layer typically
+	// returns AgentRegistry.ListSubagent().Name. Empty / nil falls back to
+	// the built-in pair so degenerate setups (no registry, tests with a
+	// stub spawner) still produce a valid schema.
+	SubagentTypes() []string
 }
 
 // ErrSubagentForbidden is returned by Spawn when the calling agent is

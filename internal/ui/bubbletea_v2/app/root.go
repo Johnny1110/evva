@@ -121,6 +121,7 @@ func (a *App) Attach(c ui.Controller) {
 	a.status.SetModel(c.Model())
 	a.status.SetEffort(c.Effort())
 	a.status.SetAgentID(c.AgentID())
+	a.status.SetAgentName(strings.ToUpper(c.ProfileName()))
 	a.status.SetPermissionMode(c.PermissionModeName())
 	a.status.SetContext(0, status.ContextLimitFor(c.Model()))
 	a.view.MarkDirty()
@@ -249,6 +250,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status.SetUsage(llm.Usage{})
 		a.status.SetContext(0, status.ContextLimitFor(a.controller.Model()))
 		a.state.SetHint("switched to " + m.Provider.Name + " / " + string(m.Model) + " · history cleared")
+		a.view.MarkDirty()
+		a.relayout()
+		return a, nil
+
+	case overlays.ProfileSwitchedMsg:
+		// Persona swap: agent has rebuilt active tools + session + LLM
+		// client. Mirror that here — clear the transcript, refresh the
+		// banner, update the dynamic agent label, reset usage. The new
+		// system prompt is in effect on the next Run.
+		a.transcript.Reset()
+		a.refreshBanner()
+		a.status.SetAgentName(strings.ToUpper(m.Name))
+		a.status.SetModel(a.controller.Model())
+		a.status.SetEffort(a.controller.Effort())
+		a.status.SetUsage(llm.Usage{})
+		a.status.SetContext(0, status.ContextLimitFor(a.controller.Model()))
+		a.state.SetHint("switched to " + m.Name + " · history cleared")
 		a.view.MarkDirty()
 		a.relayout()
 		return a, nil
@@ -600,6 +618,16 @@ func (a *App) handleSubmit(m input.SubmitMsg) (tea.Model, tea.Cmd) {
 		a.input.Reset()
 		a.slash.Reset()
 		if o := overlays.NewModel(a.controller); o != nil {
+			a.focus.Push(o)
+			a.relayout()
+		} else {
+			a.state.SetHint("no controller attached")
+		}
+		return a, nil
+	case "/profile":
+		a.input.Reset()
+		a.slash.Reset()
+		if o := overlays.NewProfile(a.controller); o != nil {
 			a.focus.Push(o)
 			a.relayout()
 		} else {

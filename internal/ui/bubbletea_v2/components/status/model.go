@@ -36,10 +36,11 @@ type StatusBar struct {
 	contextUsed  int
 	contextLimit int
 
-	model   string
-	agentID string
-	effort  string
-	permMode string
+	model     string
+	agentID   string
+	effort    string
+	permMode  string
+	agentName string
 }
 
 // New constructs a StatusBar bound to the given run-state machine.
@@ -80,6 +81,11 @@ func (s *StatusBar) SetEffort(level string) { s.effort = level }
 // cluttered for users in the default stance.
 func (s *StatusBar) SetPermissionMode(mode string) { s.permMode = mode }
 
+// SetAgentName stores the active persona's display label (typically
+// uppercased: "EVVA", "NONO"). Empty falls back to "EVVA" in Compose so
+// the pre-attach state still renders something sensible.
+func (s *StatusBar) SetAgentName(name string) { s.agentName = name }
+
 // Compose returns the rendered HUD as one styled line, padded to
 // width. Layout (left → right):
 //
@@ -95,7 +101,7 @@ func (s *StatusBar) Compose(width int, th *theme.Theme) string {
 
 	parts := []string{
 		renderStatePill(s.state, th),
-		th.UserPrompt.Render("EVVA"),
+		th.UserPrompt.Render(agentNameOrDefault(s.agentName)),
 		th.StatusKey.Render("▸ ") + th.StatusValue.Render(modelOrDash(s.model)) + renderEffort(s.effort, th),
 		th.StatusKey.Render("IN ") + th.StatusValue.Render(humanTokens(s.usage.InputTokens)) +
 			th.StatusKey.Render("  OUT ") + th.StatusValue.Render(humanTokens(s.usage.OutputTokens)),
@@ -244,6 +250,17 @@ func modelOrDash(m string) string {
 		return "-"
 	}
 	return m
+}
+
+// agentNameOrDefault returns the active persona label uppercased, or
+// "EVVA" when no name has been set. Keeps the pre-attach state rendering
+// something sensible.
+func agentNameOrDefault(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "EVVA"
+	}
+	return strings.ToUpper(name)
 }
 
 // humanTokens formats a raw token count with a `k`/`M` suffix once

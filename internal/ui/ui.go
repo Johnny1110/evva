@@ -109,6 +109,21 @@ type Controller interface {
 	// before calling — see Agent.SwitchLLM for the running guard.
 	SwitchLLM(provider constant.LLMProvider, model constant.Model) error
 
+	// SwitchProfile reconstructs the agent under a new persona — fresh
+	// system prompt, fresh active/deferred tool list, fresh session.
+	// Caller (the /profile picker) is responsible for ensuring no Run
+	// is in flight. Persists the new persona name to evva-config.yml.
+	SwitchProfile(name string) error
+
+	// ProfileName returns the active persona's wire identity ("evva",
+	// "nono", ...). Used by the TUI status bar's dynamic agent label.
+	ProfileName() string
+
+	// ListMainProfiles enumerates the personas the /profile picker
+	// should surface — every agent definition with `as: ["main", ...]`
+	// in the agent registry.
+	ListMainProfiles() []ProfileChoice
+
 	// Effort returns the current effort level name ("low"|"medium"|"high"|"ultra").
 	Effort() string
 
@@ -165,4 +180,12 @@ type PermissionDecision struct {
 type PermissionRuleSeed struct {
 	ToolName string
 	Content  string // empty means tool-wide
+}
+
+// ProfileChoice is one row in the /profile picker. Surfaces the persona
+// name plus the optional when_to_use blurb the user authored in
+// meta.yml so the picker can hint at what each persona is for.
+type ProfileChoice struct {
+	Name      string
+	WhenToUse string
 }

@@ -54,6 +54,11 @@ type AppConfig struct {
 	// Defaults to "medium". Sourced from evva-config.yml; /effort updates it.
 	DefaultEffort string
 
+	// DefaultProfile is the persona the root agent boots into ("evva", "nono",
+	// etc). Sourced from evva-config.yml; /profile updates it. Empty falls
+	// back to "evva" at bootstrap so old configs keep working.
+	DefaultProfile string
+
 	// PermissionMode is the startup permission stance. One of
 	// default|accept_edits|plan|bypass|auto. The -permission-mode CLI
 	// flag overrides this at boot; the TUI's Shift+Tab cycle mutates the
@@ -205,6 +210,17 @@ func (c *AppConfig) SetDefaultEffort(level string) error {
 	return c.SaveFile()
 }
 
+// SetDefaultProfile persists the chosen persona name. Validation against
+// the agent registry happens at the call site (AgentRegistry lives in
+// internal/agent, which can't be imported from configs without a cycle).
+// Empty string is accepted — bootstrap interprets "" as "fall back to evva".
+func (c *AppConfig) SetDefaultProfile(name string) error {
+	c.mu.Lock()
+	c.DefaultProfile = name
+	c.mu.Unlock()
+	return c.SaveFile()
+}
+
 // SetTavilyAPIKey persists the key. Empty string disables web_search.
 func (c *AppConfig) SetTavilyAPIKey(s string) error {
 	c.mu.Lock()
@@ -341,6 +357,7 @@ func load() *AppConfig {
 		DefaultProvider:      defProvider,
 		DefaultModel:         defModel,
 		DefaultEffort:        fileCfg.DefaultEffort,
+		DefaultProfile:       fileCfg.DefaultProfile,
 		PermissionMode:       fileCfg.PermissionMode,
 
 		LoadedAt: time.Now(),
@@ -384,6 +401,7 @@ func (c *AppConfig) SaveFile() error {
 		DefaultProvider:      c.DefaultProvider.Name,
 		DefaultModel:         string(c.DefaultModel),
 		DefaultEffort:        c.DefaultEffort,
+		DefaultProfile:       c.DefaultProfile,
 		PermissionMode:       c.PermissionMode,
 		FetchMaxBytes:        c.FetchMaxBytes,
 		TavilyAPIKey:         c.TavilyAPIKey,

@@ -208,6 +208,52 @@ func TestLoad_MainAndSubagent(t *testing.T) {
 	}
 }
 
+// TestLoad_MemoryAndSkillsFlagsDefaultOff verifies the legacy contract
+// holds when meta.yml omits inject_memory / advertise_skills: disk
+// personas stay minimal unless they opt in.
+func TestLoad_MemoryAndSkillsFlagsDefaultOff(t *testing.T) {
+	home := t.TempDir()
+	agentsDir := filepath.Join(home, "agents")
+	writeAgent(t, agentsDir, "lite", "body\n",
+		"active: [bash]\n",
+		"as: [main]\n", // no inject_memory / advertise_skills keys
+	)
+	defs, warns := Load(home)
+	if len(warns) != 0 || len(defs) != 1 {
+		t.Fatalf("warns=%v defs=%d", warns, len(defs))
+	}
+	d := defs[0]
+	if !d.OmitMemory {
+		t.Errorf("default should OmitMemory=true (inject_memory unset)")
+	}
+	if d.AdvertiseSkills {
+		t.Errorf("default should AdvertiseSkills=false (advertise_skills unset)")
+	}
+}
+
+// TestLoad_MemoryAndSkillsFlagsRespected covers the opt-in path: a
+// main-tier disk persona that wants memory + skills flips the YAML
+// flags and gets them.
+func TestLoad_MemoryAndSkillsFlagsRespected(t *testing.T) {
+	home := t.TempDir()
+	agentsDir := filepath.Join(home, "agents")
+	writeAgent(t, agentsDir, "rich", "body\n",
+		"active: [bash]\n",
+		"as: [main]\ninject_memory: true\nadvertise_skills: true\n",
+	)
+	defs, warns := Load(home)
+	if len(warns) != 0 || len(defs) != 1 {
+		t.Fatalf("warns=%v defs=%d", warns, len(defs))
+	}
+	d := defs[0]
+	if d.OmitMemory {
+		t.Errorf("inject_memory: true should set OmitMemory=false")
+	}
+	if !d.AdvertiseSkills {
+		t.Errorf("advertise_skills: true should be reflected")
+	}
+}
+
 func TestLoad_SkipsHiddenDirectories(t *testing.T) {
 	home := t.TempDir()
 	agentsDir := filepath.Join(home, "agents")

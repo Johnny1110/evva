@@ -19,6 +19,17 @@ type metaYml struct {
 	As        []string `yaml:"as"`
 	Model     string   `yaml:"model"`
 	WhenToUse string   `yaml:"when_to_use"`
+
+	// InjectMemory, when true, injects the workdir EVVA.md + USER_PROFILE.md
+	// snapshot into this agent's system prompt at session start. Default
+	// false matches the legacy behavior — opt-in keeps disk personas minimal
+	// unless the author explicitly wants project / user context.
+	InjectMemory bool `yaml:"inject_memory"`
+
+	// AdvertiseSkills, when true, surfaces the user-installed skill catalog
+	// to this agent. Default false. Built-in evva flips this to true via
+	// its Go-defined AgentDefinition; disk personas opt in here.
+	AdvertiseSkills bool `yaml:"advertise_skills"`
 }
 
 func readToolsYml(path string) (toolsYml, error) {

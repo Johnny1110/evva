@@ -43,6 +43,7 @@ var builtins = []Command{
 	{Name: "/config", Desc: "edit runtime settings (max_iterations, api keys, …)"},
 	{Name: "/effort", Desc: "set thinking effort · low, medium, high, ultra"},
 	{Name: "/model", Desc: "switch llm provider / model · clears history"},
+	{Name: "/profile", Desc: "switch agent persona · clears history"},
 	{Name: "/clear", Desc: "clear the transcript"},
 	{Name: "/exit", Desc: "quit evva"},
 }

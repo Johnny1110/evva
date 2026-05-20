@@ -308,7 +308,9 @@ agent({
 }
 
 func (t *AgentTool) Schema() json.RawMessage {
-	return json.RawMessage(`{
+	types := t.subagentTypes()
+	enumJSON, _ := json.Marshal(types)
+	return json.RawMessage(fmt.Sprintf(`{
 		"type":"object",
 		"additionalProperties":false,
 		"required":["name", "description","prompt"],
@@ -316,11 +318,27 @@ func (t *AgentTool) Schema() json.RawMessage {
 			"name":{"type":"string","description":"A short nickname"},
 			"description":{"type":"string","description":"A short (3-5 word) description of the task"},
 			"prompt":{"type":"string","description":"The full task prompt for the sub-agent"},
-			"subagent_type":{"type":"string","enum":["explore","general-purpose"],"description":"Which preset profile to use. Defaults to general-purpose. \"explore\" is read-only and good for codebase inspection."},
+			"subagent_type":{"type":"string","enum":%s,"description":"Which preset profile to use. Defaults to general-purpose. \"explore\" is read-only and good for codebase inspection."},
 			"level":{"type":"integer","enum":[1,2],"default":1,"description":"Model tier within the parent's provider. 1=general, 2=thinking Defaults to 1. Use 2 only when the task genuinely needs deeper reasoning."},
 			"async_mode":{"type":"boolean","default":false,"description":"Let the subagent run in the background; the spawner returns an ack immediately and the eventual summary is injected into the parent's next turn."}
 		}
-	}`)
+	}`, enumJSON))
+}
+
+// subagentTypes resolves the enum members for the schema's subagent_type
+// field. Reads through the lookup so the registry contents at Schema()
+// time win — Phase 6 disk subagents become wire-callable as soon as the
+// registry sees them. Falls back to the built-in pair when no spawner is
+// installed (tests, degenerate setups) so the schema is always valid.
+func (t *AgentTool) subagentTypes() []string {
+	if t.lookup != nil {
+		if sp := t.lookup(); sp != nil {
+			if names := sp.SubagentTypes(); len(names) > 0 {
+				return names
+			}
+		}
+	}
+	return []string{"explore", "general-purpose"}
 }
 
 type agentInput struct {

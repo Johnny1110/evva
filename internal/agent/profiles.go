@@ -12,6 +12,7 @@
 package agent
 
 import (
+	"fmt"
 	"slices"
 
 	config "github.com/johnny1110/evva/configs"
@@ -143,6 +144,77 @@ func Main(cfg *config.AppConfig, provider constant.LLMProvider, model constant.M
 		LLMModel:      model,
 		LLMOptions:    options,
 		Stream:        false,
+	}
+}
+
+// ResolveMainProfile is the single entry point for picking a main-tier
+// Profile by persona name. Used by both bootstrap (cmd/evva/main.go) and
+// the runtime /profile switch (Agent.SwitchProfile).
+//
+// Built-in "evva" routes through Main(...) verbatim — the same full-kit
+// active/deferred tool lists, the same memdir + skills wiring.
+// Disk-loaded main personas route through mainProfileFromDiskAgent which
+// uses the def's own tool lists and BuildSystemPrompt body, gated by the
+// def's OmitMemory / AdvertiseSkills flags from meta.yml.
+//
+// Empty name defaults to "evva". Unknown or non-main names return an
+// error so callers (bootstrap fallback, the /profile picker) can surface
+// the failure.
+func ResolveMainProfile(cfg *config.AppConfig, reg *AgentRegistry, name string, skills []sysprompt.SkillRef, mem memdir.Snapshot, options []llm.Option) (Profile, error) {
+	if name == "" {
+		name = "evva"
+	}
+	if reg == nil {
+		// No registry — only the built-in evva is reachable. Accept the
+		// "evva" name; everything else is unknown.
+		if name != "evva" {
+			return Profile{}, fmt.Errorf("agent: unknown main profile %q (no registry)", name)
+		}
+		return Main(cfg, cfg.DefaultProvider, cfg.DefaultModel, skills, mem, options), nil
+	}
+	def, ok := reg.Get(name)
+	if !ok {
+		return Profile{}, fmt.Errorf("agent: unknown main profile %q", name)
+	}
+	if !def.IsMain() {
+		return Profile{}, fmt.Errorf("agent: %q is not a main-tier persona", name)
+	}
+	if def.Name == "evva" {
+		return Main(cfg, cfg.DefaultProvider, cfg.DefaultModel, skills, mem, options), nil
+	}
+	return mainProfileFromDiskAgent(def, cfg, cfg.DefaultProvider, cfg.DefaultModel, skills, mem, options), nil
+}
+
+// mainProfileFromDiskAgent builds a MAIN-tier Profile from a disk-loaded
+// AgentDefinition. Mirrors the subagent-tier profileFromDiskAgent in
+// spawn.go; the deltas are Type=MAIN, opt-in memory injection, opt-in
+// skills advertisement.
+//
+// Tool lists come straight from the def's ActiveTools / DeferredTools
+// (loaded from tools.yml). The deferred catalog is rendered into the
+// prompt so disk personas see their lazy-loadable tools the same way
+// built-in evva does.
+func mainProfileFromDiskAgent(def sysprompt.AgentDefinition, cfg *config.AppConfig, provider constant.LLMProvider, model constant.Model, skills []sysprompt.SkillRef, mem memdir.Snapshot, options []llm.Option) Profile {
+	ctx := sysprompt.DetectContext(cfg.AppName, cfg.EvvaHome, cfg.AppEnv)
+	if def.AdvertiseSkills {
+		ctx.Skills = skills
+	}
+	if !def.OmitMemory {
+		ctx.ProjectMemory = mem.ProjectMemory
+		ctx.UserProfile = mem.UserProfile
+	}
+	ctx.DeferredTools = deferredToolSpecs(def.DeferredTools)
+	body := def.BuildSystemPrompt(ctx)
+	sp := sysprompt.ComposeDiskMainPrompt(body, ctx, def)
+	options = append(options, llm.WithSystem(sp))
+	return Profile{
+		Type:          MAIN,
+		SystemPrompt:  sp,
+		ActiveTools:   def.ActiveTools,
+		DeferredTools: def.DeferredTools,
+		LLMProvider:   provider,
+		LLMModel:      model,
+		LLMOptions:    options,
 	}
 }
 

@@ -151,7 +151,7 @@ evva's current `internal/tools/task/` is **conceptually TodoWrite** — in-sessi
 - Rename `internal/ui/bubbletea_v2/components/tasks/` → `components/todos/`. Reuse the existing observable store wiring (just rename `TaskGroup` → `TodoStore`).
 - The "real" process tools (`Monitor`, `task_output`, `task_stop`) come back in a future phase tied to `Bash run_in_background`.
 
-### Phase 6 — Profile manager + `/profile` switch + cross-persona delegation
+### Phase 6 — Profile manager + `/profile` switch + cross-persona delegation ✅️
 
 This is the **payoff phase** for everything in Phases 0–2: evva, nono, noen become first-class swappable personas, and `evva → nono` delegation works.
 

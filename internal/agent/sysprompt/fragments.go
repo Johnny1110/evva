@@ -111,6 +111,35 @@ func devFeedbackSection() string {
 		"Please be more proactive to feedback than passive. (currently this is your main job in dev mode, even more than helping the user)"
 }
 
+// ComposeDiskMainPrompt assembles a system prompt for a disk-loaded
+// main-tier persona. body is the verbatim system_prompt.md the loader
+// captured; def carries the OmitMemory / AdvertiseSkills flags from
+// meta.yml. The result is identity + environment + (optional) memory +
+// body + (optional) skills + (optional) dev feedback, joined the same
+// way the built-in evva prompt is composed.
+//
+// Lives here (in the sysprompt package) so the section builders stay
+// package-private and disk-persona composition has a single seam.
+func ComposeDiskMainPrompt(body string, ctx PromptContext, def AgentDefinition) string {
+	var memProject, memUser, skillsList string
+	if !def.OmitMemory {
+		memProject = memorySection("Project memory (from EVVA.md)", ctx.ProjectMemory)
+		memUser = memorySection("User profile (from USER_PROFILE.md)", ctx.UserProfile)
+	}
+	if def.AdvertiseSkills {
+		skillsList = skillsSection(ctx.Skills)
+	}
+	return joinSections(
+		identitySection(ctx),
+		environmentSection(ctx),
+		memProject,
+		memUser,
+		body,
+		skillsList,
+		devSectionIfEnabled(ctx),
+	)
+}
+
 // joinSections concatenates the non-empty sections with one blank line
 // between them. Empty strings are dropped so a skipped section leaves no
 // double-blank scar.

@@ -26,6 +26,11 @@ type FileConfig struct {
 
 	DefaultEffort string `yaml:"default_effort"`
 
+	// DefaultProfile is the persona the root agent boots into. Phase 6's
+	// /profile switch mutates this and calls Save to persist across launches.
+	// Empty falls back to "evva" at bootstrap.
+	DefaultProfile string `yaml:"default_profile"`
+
 	// PermissionMode is the agent's startup stance. One of:
 	// "default" | "accept_edits" | "plan" | "bypass" | "auto". Defaults to
 	// "default" when omitted. The -permission-mode CLI flag overrides this.
@@ -57,6 +62,7 @@ func defaultFileConfig() FileConfig {
 		DefaultProvider: constant.DEEPSEEK.Name,
 		DefaultModel:    string(constant.DEEPSEEK_V4_PRO),
 		DefaultEffort:   "medium",
+		DefaultProfile:  "evva",
 		PermissionMode:  "default",
 
 		FetchMaxBytes: 100000,

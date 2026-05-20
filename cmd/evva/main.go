@@ -68,15 +68,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "evva:", w)
 	}
 
-	prof := agent.Main(cfg, cfg.DefaultProvider, cfg.DefaultModel, skillRefs, memSnap, buildOptions(*temp, *maxTokens))
-
-	// Build the agent registry: built-in personas (Main, Explore, General)
-	// merged with disk-loaded definitions under <EVVA_HOME>/agents/. Bad
-	// disk agents degrade gracefully — they're skipped with a warning, the
-	// session continues without them.
+	// Build the agent registry first: ResolveMainProfile reads from it to
+	// pick the right persona (built-in evva or a disk-loaded persona under
+	// <EVVA_HOME>/agents/). Bad disk agents degrade gracefully — they're
+	// skipped with a warning, the session continues without them.
 	agentReg, agentWarns := agent.BuildAgentRegistry(cfg.EvvaHome)
 	for _, w := range agentWarns {
 		fmt.Fprintln(os.Stderr, "evva:", w.Error())
+	}
+
+	profName := cfg.DefaultProfile
+	if profName == "" {
+		profName = "evva"
+	}
+	prof, profErr := agent.ResolveMainProfile(cfg, agentReg, profName, skillRefs, memSnap, buildOptions(*temp, *maxTokens))
+	if profErr != nil {
+		fmt.Fprintln(os.Stderr, "evva:", profErr, "— falling back to evva")
+		prof, _ = agent.ResolveMainProfile(cfg, agentReg, "evva", skillRefs, memSnap, buildOptions(*temp, *maxTokens))
+		profName = "evva"
 	}
 
 	// Permission system: load project + user rules, build the approval
@@ -94,10 +103,10 @@ func main() {
 
 	useTUI := !*noTUI && isTTY(os.Stdout)
 	if useTUI {
-		runTUI(ctx, prof, *maxIters, cfg.AppName, cfg.EvvaHome, registry, agentReg, permStore, permBroker, permMode, *uiKind)
+		runTUI(ctx, prof, profName, skillRefs, memSnap, *maxIters, cfg.AppName, cfg.EvvaHome, registry, agentReg, permStore, permBroker, permMode, *uiKind)
 		return
 	}
-	runCLI(ctx, prof, *maxIters, cfg.AppName, registry, agentReg, permStore, permBroker, permMode)
+	runCLI(ctx, prof, profName, skillRefs, memSnap, *maxIters, cfg.AppName, registry, agentReg, permStore, permBroker, permMode)
 }
 
 // resolvePermissionMode picks the active mode using CLI > YAML > "default"
@@ -140,7 +149,7 @@ func skillRefsFromRegistry(r *skill.Registry) []sysprompt.SkillRef {
 // or "v2" (clean-architecture rewrite, in active development). Both
 // satisfy the same ui.UI contract, so the agent-side wiring is
 // identical.
-func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHome string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode, kind string) {
+func runTUI(ctx context.Context, prof agent.Profile, profName string, skillRefs []sysprompt.SkillRef, memSnap memdir.Snapshot, maxIters int, name, evvaHome string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode, kind string) {
 	var tui ui.UI
 	switch kind {
 	default:
@@ -160,6 +169,9 @@ func runTUI(ctx context.Context, prof agent.Profile, maxIters int, name, evvaHom
 		agent.WithMaxIterations(maxIters),
 		agent.WithSkillRegistry(skills),
 		agent.WithAgentRegistry(agents),
+		agent.WithPersona(profName),
+		agent.WithSkillRefs(skillRefs),
+		agent.WithMemorySnapshot(memSnap),
 		agent.WithPermissionStore(permStore),
 		agent.WithPermissionBroker(permBroker),
 		agent.WithPermissionMode(permMode),
@@ -202,7 +214,7 @@ func buildApprovalEvent(req permission.ApprovalRequest) event.Event {
 // Preserves the original behavior: read prompt → run → stream events as
 // plain text → exit. ErrIterLimit triggers a synchronous "press Enter to
 // continue" prompt on stderr.
-func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode) {
+func runCLI(ctx context.Context, prof agent.Profile, profName string, skillRefs []sysprompt.SkillRef, memSnap memdir.Snapshot, maxIters int, name string, skills *skill.Registry, agents *agent.AgentRegistry, permStore *permission.Store, permBroker permission.Broker, permMode permission.Mode) {
 	prompt, err := readPrompt(flag.Args())
 	if err != nil {
 		exitf(2, "evva: %v", err)
@@ -228,6 +240,9 @@ func runCLI(ctx context.Context, prof agent.Profile, maxIters int, name string, 
 		agent.WithMaxIterations(maxIters),
 		agent.WithSkillRegistry(skills),
 		agent.WithAgentRegistry(agents),
+		agent.WithPersona(profName),
+		agent.WithSkillRefs(skillRefs),
+		agent.WithMemorySnapshot(memSnap),
 		agent.WithPermissionStore(permStore),
 		agent.WithPermissionBroker(permBroker),
 		agent.WithPermissionMode(permMode),

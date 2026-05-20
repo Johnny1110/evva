@@ -11,7 +11,7 @@ import "github.com/johnny1110/evva/internal/tools"
 //
 // Field semantics:
 //
-//   - Name              wire identifier ("main", "explore", "general-purpose").
+//   - Name              wire identifier ("evva", "explore", "general-purpose").
 //                       Same string the Agent tool's subagent_type enum will
 //                       accept (Phase 2 unifies these). Lowercase, hyphenated.
 //   - WhenToUse         description shown in the Agent tool's catalog so a
@@ -76,8 +76,8 @@ func (d AgentDefinition) IsSubagent() bool {
 // Phase 6 may add more main-tier personas (nono, noen) as siblings.
 var (
 	MainAgent = AgentDefinition{
-		Name:              "main",
-		WhenToUse:         "", // Main is the root persona — not delegated to.
+		Name:              "evva",
+		WhenToUse:         "", // Evva is the built-in root persona — not delegated to.
 		OmitMemory:        false,
 		AdvertiseSkills:   true,
 		BuildSystemPrompt: buildMainPrompt,

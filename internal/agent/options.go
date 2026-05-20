@@ -3,6 +3,8 @@ package agent
 import (
 	config "github.com/johnny1110/evva/configs"
 	"github.com/johnny1110/evva/internal/agent/event"
+	"github.com/johnny1110/evva/internal/agent/sysprompt"
+	"github.com/johnny1110/evva/internal/memdir"
 	"github.com/johnny1110/evva/internal/permission"
 	"github.com/johnny1110/evva/internal/tools/skill"
 )
@@ -117,5 +119,36 @@ func WithPermissionBroker(b permission.Broker) Option {
 func WithAgentRegistry(r *AgentRegistry) Option {
 	return func(a *Agent) {
 		a.agentRegistry = r
+	}
+}
+
+// WithPersona records the active persona's wire name on the agent.
+// Callers set this from profile-resolution so ProfileName() and the TUI
+// status bar render the right label. Empty leaves the field as-is (the
+// bootstrap caller is expected to set it explicitly).
+func WithPersona(name string) Option {
+	return func(a *Agent) {
+		if name != "" {
+			a.activePersona = name
+		}
+	}
+}
+
+// WithSkillRefs stashes the skill snapshot the agent was bootstrapped
+// with so SwitchProfile can rebuild the system prompt with the same
+// skill catalog. The snapshot is a flat slice the sysprompt builder
+// consumes; the agent does not call into the skill package directly.
+func WithSkillRefs(refs []sysprompt.SkillRef) Option {
+	return func(a *Agent) {
+		a.skillRefs = refs
+	}
+}
+
+// WithMemorySnapshot stashes the EVVA.md + USER_PROFILE.md snapshot
+// loaded at startup. Reused by SwitchProfile when constructing a new
+// persona's system prompt — the on-disk files are read once at boot.
+func WithMemorySnapshot(snap memdir.Snapshot) Option {
+	return func(a *Agent) {
+		a.memSnap = snap
 	}
 }
